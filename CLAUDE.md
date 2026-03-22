@@ -21,10 +21,8 @@ Add this to `~/.claude/settings.json` under `mcpServers`:
   "mcpServers": {
     "review-context": {
       "type": "stdio",
-      "command": "node",
-      "args": [
-        "/Users/amoscoletti/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/dist/index.js"
-      ],
+      "command": "/bin/sh",
+      "args": ["-c", "exec node \"$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/dist/index.js\""],
       "env": {}
     }
   }

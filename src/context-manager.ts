@@ -3,9 +3,10 @@ import { readFile, writeFile, rename, unlink, stat } from "fs/promises";
 import { readFileSync, existsSync, mkdirSync, readdirSync } from "fs";
 import { join, resolve, relative } from "path";
 import { createHash } from "crypto";
+import { homedir } from "os";
 
 const CACHE_DIR = join(
-  process.env.HOME ?? "~",
+  homedir(),
   ".claude",
   "review-cache",
 );
