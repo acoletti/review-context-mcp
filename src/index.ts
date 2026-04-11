@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ContextManager, toErrorMessage } from "./context-manager.js";
+import { ContextManager, toErrorMessage, buildBoardContextPayload } from "./context-manager.js";
 
 const debug = process.env.REVIEW_CONTEXT_DEBUG === "true";
 const manager = new ContextManager(debug);
@@ -57,7 +57,8 @@ server.tool(
 server.tool(
   "review_index_directory",
   "Index all matching files in a directory into Augment's context engine. " +
-    "Defaults to common source file extensions. Excludes node_modules, dist, .git, etc.",
+    "Defaults to common source file extensions. Excludes node_modules, dist, .git, etc. " +
+    "Unreadable or oversized files are reported in the response summary.",
   {
     directory: z.string().describe("Absolute path to the directory to index"),
     patterns: z
@@ -71,12 +72,18 @@ server.tool(
   async ({ directory, patterns }) => {
     try {
       const result = await manager.indexDirectory(directory, patterns ?? undefined);
+      const summary = [
+        `Indexed ${result.fileCount} files from ${directory}. ` +
+          `${result.newlyUploaded.length} new, ${result.alreadyUploaded.length} already cached.`,
+      ];
+      if (result.errors.length > 0) {
+        summary.push(`Errors (${result.errors.length}): ${result.errors.join("; ")}`);
+      }
       return {
         content: [
           {
             type: "text" as const,
-            text: `Indexed ${result.fileCount} files from ${directory}. ` +
-              `${result.newlyUploaded.length} new, ${result.alreadyUploaded.length} already cached.`,
+            text: summary.join("\n"),
           },
         ],
       };
@@ -123,6 +130,48 @@ server.tool(
   },
 );
 
+// ─── Tool: review_search_structured ──────────────────────────────────────
+// Structured search output for workflows that want reusable chunks.
+
+server.tool(
+  "review_search_structured",
+  "Search the indexed codebase and return structured chunks with file paths, " +
+    "line ranges, previews, and stable chunk IDs. Use this when an orchestrator " +
+    "wants reusable retrieval artifacts instead of one large formatted text blob.",
+  {
+    query: z.string().describe("Natural language search query describing what code you need"),
+    max_output_length: z
+      .number()
+      .min(1000)
+      .max(80000)
+      .optional()
+      .describe("Maximum character length of results to request before chunk parsing."),
+    include_raw: z
+      .boolean()
+      .optional()
+      .describe("Include the raw formatted search result alongside structured chunks."),
+  },
+  async ({ query, max_output_length, include_raw }) => {
+    try {
+      const result = await manager.searchStructured(query, max_output_length ?? 20000);
+      const payload = include_raw
+        ? result
+        : {
+            ...result,
+            rawResult: undefined,
+          };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 // ─── Tool: review_search_and_ask ─────────────────────────────────────────
 // Combined search + LLM reasoning via Augment's backend.
 
@@ -130,7 +179,8 @@ server.tool(
   "review_search_and_ask",
   "Search the indexed codebase and ask Augment's LLM a question about the results. " +
     "Combines semantic retrieval with AI reasoning in a single call. " +
-    "Useful for getting quick answers about code patterns or architecture.",
+    "Useful for getting quick answers about code patterns or architecture. " +
+    "Requires AUGMENT_API_TOKEN and AUGMENT_API_URL in the MCP server env.",
   {
     query: z.string().describe("Search query to find relevant code"),
     prompt: z
@@ -143,6 +193,104 @@ server.tool(
       const result = await manager.searchAndAsk(query, prompt ?? undefined);
       return {
         content: [{ type: "text" as const, text: result }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ─── Tool: review_prepare_board_context ──────────────────────────────────
+// Build a reusable context bundle for code-review-board style workflows.
+
+server.tool(
+  "review_prepare_board_context",
+  "Prepare a reusable context bundle for multi-agent review workflows. " +
+    "Optionally indexes the provided files, runs a focused retrieval query, " +
+    "captures repository state, and returns JSON fields ready to feed into the code-review-board prompt builder. " +
+    "Prepared bundles are cached and persisted with saved sessions.",
+  {
+    workspace_root: z
+      .string()
+      .describe("Absolute path to the workspace/repository root directory"),
+    user_request: z
+      .string()
+      .describe("The review-board user request to preserve verbatim in the bundle"),
+    paths: z
+      .array(z.string())
+      .optional()
+      .describe("Changed or target file paths (absolute or relative to workspace_root). " +
+        "If omitted, uses the current indexed workspace state."),
+    retrieval_query: z
+      .string()
+      .optional()
+      .describe("Focused semantic retrieval query to run (defaults to user_request)"),
+    max_output_length: z
+      .number()
+      .min(1000)
+      .max(80000)
+      .optional()
+      .describe("Maximum character length for the retrieval pass."),
+    excerpt_char_limit: z
+      .number()
+      .min(1000)
+      .max(40000)
+      .optional()
+      .describe("Maximum character budget for focused code excerpts."),
+    budget_chars_per_token: z
+      .number()
+      .min(1)
+      .max(16)
+      .optional()
+      .describe("Approximate characters-per-token ratio used to derive prompt-ready phase budgets."),
+    phase_context_target_tokens: z
+      .object({
+        planning: z.number().min(100).max(20000).optional(),
+        debate: z.number().min(100).max(20000).optional(),
+        synthesis: z.number().min(100).max(20000).optional(),
+      })
+      .optional()
+      .describe("Optional prompt budget targets, in tokens, for planning/debate/synthesis shared context packages."),
+    section_summary_char_limits: z
+      .record(z.string(), z.number().min(100).max(20000))
+      .optional()
+      .describe("Optional per-section character limits used when summarizing prompt-ready phase packages."),
+    include_legacy_doc: z
+      .boolean()
+      .optional()
+      .describe("Include CLAUDE.md in project_rules when present."),
+  },
+  async ({
+    workspace_root,
+    user_request,
+    paths,
+    retrieval_query,
+    max_output_length,
+    excerpt_char_limit,
+    budget_chars_per_token,
+    phase_context_target_tokens,
+    section_summary_char_limits,
+    include_legacy_doc,
+  }) => {
+    try {
+      const { context, cached } = await manager.prepareBoardContext({
+        workspaceRoot: workspace_root,
+        userRequest: user_request,
+        paths: paths ?? [],
+        retrievalQuery: retrieval_query ?? undefined,
+        maxOutputLength: max_output_length ?? undefined,
+        excerptCharLimit: excerpt_char_limit ?? undefined,
+        budgetCharsPerToken: budget_chars_per_token ?? undefined,
+        phaseContextTargetTokens: phase_context_target_tokens ?? undefined,
+        sectionSummaryCharLimits: section_summary_char_limits ?? undefined,
+        includeLegacyDoc: include_legacy_doc ?? undefined,
+      });
+      const payload = buildBoardContextPayload(context, cached);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
       };
     } catch (err) {
       return {
@@ -287,7 +435,7 @@ server.tool(
 server.tool(
   "review_status",
   "Show the current state of the review context: active index, session ID, " +
-    "number of indexed files, and cached results.",
+    "number of indexed files, cached search results, and prepared board contexts.",
   {},
   async () => {
     const status = manager.getStatus();
@@ -301,7 +449,8 @@ server.tool(
             `Workspace: ${status.workspaceRoot ?? "none"}\n` +
             `Indexed files: ${status.indexedFiles}\n` +
             `Indexing complete: ${status.indexingComplete}\n` +
-            `Cached results: ${status.cachedResults}`,
+            `Cached results: ${status.cachedResults}\n` +
+            `Prepared board contexts: ${status.preparedBoardContexts}`,
         },
       ],
     };

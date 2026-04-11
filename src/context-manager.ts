@@ -1,4 +1,5 @@
 import { DirectContext, type File, type IndexingResult } from "@augmentcode/auggie-sdk";
+import { execFileSync } from "child_process";
 import { readFile, writeFile, rename, unlink, stat } from "fs/promises";
 import { readFileSync, existsSync, mkdirSync, readdirSync } from "fs";
 import { join, resolve, relative } from "path";
@@ -28,13 +29,158 @@ interface SessionMeta {
   workspaceRoot: string;
 }
 
+interface StructuredSearchChunk {
+  id: string;
+  path: string | null;
+  startLine: number | null;
+  endLine: number | null;
+  lineCount: number;
+  truncated: boolean;
+  preview: string;
+  snippet: string;
+}
+
+interface StructuredSearchResult {
+  query: string;
+  cached: boolean;
+  chunkCount: number;
+  chunks: StructuredSearchChunk[];
+  rawResult: string;
+}
+
+interface IndexingSummary {
+  performed: boolean;
+  fileCount: number;
+  newlyUploaded: string[];
+  alreadyUploaded: string[];
+  errors: string[];
+}
+
+interface BoardPromptInput {
+  user_request: string;
+  focused_code_excerpts: string;
+  augment_retrieval_excerpts: string;
+  corpus_reference_excerpts: string;
+  applicable_coding_standards: string;
+  repository_state: string;
+  project_rules: string;
+  external_documentation: string;
+  external_documentation_summary: string;
+  cross_repository_patterns: string;
+  cross_repository_patterns_summary: string;
+  referenced_file_paths: string[];
+}
+
+type BoardContextPhase = "planning" | "debate" | "synthesis";
+
+interface PreparedContextSection {
+  key: string;
+  label: string;
+  body: string;
+  priority: number;
+  required: boolean;
+  mode: "full" | "summary" | "omitted";
+}
+
+interface PreparedContextPackage {
+  budget_chars: number;
+  sections: PreparedContextSection[];
+}
+
+interface PreparedBoardContext {
+  workspaceRoot: string;
+  userRequest: string;
+  retrievalQuery: string;
+  sessionId: string | null;
+  generatedAt: number;
+  indexing: IndexingSummary;
+  structuredSearch: StructuredSearchResult;
+  builderInput: BoardPromptInput;
+  preparedContextPackages: Partial<Record<BoardContextPhase, PreparedContextPackage>>;
+  artifactMarkdown: string;
+}
+
+interface PersistedCaches {
+  searchResults: Array<[string, CachedResult]>;
+  boardContexts?: Array<[string, PreparedBoardContext]>;
+}
+
+interface PrepareBoardContextOptions {
+  workspaceRoot: string;
+  userRequest: string;
+  paths?: string[];
+  retrievalQuery?: string;
+  maxOutputLength?: number;
+  excerptCharLimit?: number;
+  includeLegacyDoc?: boolean;
+  budgetCharsPerToken?: number;
+  phaseContextTargetTokens?: Partial<Record<BoardContextPhase, number>>;
+  sectionSummaryCharLimits?: Record<string, number>;
+}
+
 export function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+export const TRANSPORT_MAX_BYTES = 80_000;
+
+/**
+ * Build the MCP transport payload for review_prepare_board_context.
+ * Uses planning-phase section bodies for excerpt fields so summarized content
+ * is not bypassed by the raw builderInput values.
+ * If the serialized result exceeds TRANSPORT_MAX_BYTES, artifact_markdown is
+ * omitted (it is derivable from prepared_context_packages.planning).
+ */
+export function buildBoardContextPayload(
+  context: PreparedBoardContext,
+  cached: boolean,
+): Record<string, unknown> {
+  const { rawResult: _raw, ...structuredSearch } = context.structuredSearch;
+
+  // Resolve excerpt fields from planning sections (may be summarized)
+  const planSections = context.preparedContextPackages.planning?.sections ?? [];
+  const getSectionBody = (key: string, fallback: string): string => {
+    const section = planSections.find((s) => s.key === key);
+    return section ? section.body : fallback;
+  };
+
+  const builderInput = {
+    ...context.builderInput,
+    focused_code_excerpts: getSectionBody(
+      "focused_code_excerpts",
+      context.builderInput.focused_code_excerpts,
+    ),
+    augment_retrieval_excerpts: getSectionBody(
+      "augment_retrieval_excerpts",
+      context.builderInput.augment_retrieval_excerpts,
+    ),
+  };
+
+  const payload: Record<string, unknown> = {
+    cached,
+    session_id: context.sessionId,
+    generated_at: new Date(context.generatedAt).toISOString(),
+    workspace_root: context.workspaceRoot,
+    indexing: context.indexing,
+    structured_search: structuredSearch,
+    builder_input: builderInput,
+    prepared_context_packages: context.preparedContextPackages,
+    artifact_markdown: context.artifactMarkdown,
+  };
+
+  // Final transport-size guard: drop artifact_markdown if payload is over budget
+  // (artifact_markdown is a rendering of prepared_context_packages.planning sections)
+  if (JSON.stringify(payload).length > TRANSPORT_MAX_BYTES) {
+    delete payload.artifact_markdown;
+  }
+
+  return payload;
 }
 
 export class ContextManager {
   private ctx: DirectContext | null = null;
   private resultCache = new Map<string, CachedResult>();
+  private boardContextCache = new Map<string, PreparedBoardContext>();
   private sessionId: string | null = null;
   private workspaceRoot: string | null = null;
   private indexingComplete = false;
@@ -70,6 +216,419 @@ export class ContextManager {
     return join(CACHE_DIR, `${id}.cache.json`);
   }
 
+  private shortHash(value: string): string {
+    return createHash("sha256").update(value).digest("hex").slice(0, 16);
+  }
+
+  private normalizePaths(paths: string[], workspaceRoot: string): string[] {
+    const resolvedRoot = resolve(workspaceRoot);
+    return [...new Set(
+      paths.map((path) => relative(resolvedRoot, resolve(resolvedRoot, path))),
+    )].sort();
+  }
+
+  private async pathFingerprint(paths: string[], workspaceRoot: string): Promise<string> {
+    const entries = await Promise.all(
+      paths.map(async (path) => {
+        try {
+          const fileStat = await stat(resolve(workspaceRoot, path));
+          return `${path}:${fileStat.size}:${Math.floor(fileStat.mtimeMs)}`;
+        } catch (err) {
+          return `${path}:missing:${toErrorMessage(err)}`;
+        }
+      }),
+    );
+    return entries.join("|");
+  }
+
+  private parseStructuredChunks(rawResult: string): StructuredSearchChunk[] {
+    const pathMatches = [...rawResult.matchAll(/^Path:\s+(.+)$/gm)];
+    if (pathMatches.length === 0) {
+      const snippet = rawResult.trim();
+      if (!snippet) {
+        return [];
+      }
+      return [{
+        id: this.shortHash(`raw:${snippet}`),
+        path: null,
+        startLine: null,
+        endLine: null,
+        lineCount: 0,
+        truncated: snippet.includes("..."),
+        preview: snippet.split("\n").find((line) => line.trim() !== "")?.trim() ?? "",
+        snippet,
+      }];
+    }
+
+    return pathMatches.map((match, index) => {
+      const path = match[1].trim();
+      const sectionStart = (match.index ?? 0) + match[0].length;
+      const sectionEnd = index + 1 < pathMatches.length
+        ? pathMatches[index + 1].index ?? rawResult.length
+        : rawResult.length;
+      const body = rawResult.slice(sectionStart, sectionEnd).trim();
+      const lines = body.split("\n").map((line) => line.trimEnd()).filter((line) => line !== "");
+
+      let startLine: number | null = null;
+      let endLine: number | null = null;
+      let lineCount = 0;
+
+      for (const line of lines) {
+        const lineMatch = line.match(/^\s*(\d+)\t?(.*)$/);
+        if (!lineMatch) {
+          continue;
+        }
+        const lineNumber = Number(lineMatch[1]);
+        if (startLine === null) {
+          startLine = lineNumber;
+        }
+        endLine = lineNumber;
+        lineCount += 1;
+      }
+
+      const preview = lines
+        .map((line) => line.replace(/^\s*\d+\t?/, "").trim())
+        .find((line) => line !== "" && line !== "...") ?? "";
+
+      const snippet = lines.join("\n");
+      return {
+        id: this.shortHash(`${path}:${startLine ?? "na"}:${endLine ?? "na"}:${snippet}`),
+        path,
+        startLine,
+        endLine,
+        lineCount,
+        truncated: lines.some((line) => line.trim() === "..."),
+        preview,
+        snippet,
+      };
+    });
+  }
+
+  private renderStructuredChunks(chunks: StructuredSearchChunk[], maxChunks = 6): string {
+    return chunks.slice(0, maxChunks).map((chunk) => {
+      const lines = [`Path: ${chunk.path ?? "unknown"}`];
+      if (chunk.startLine !== null && chunk.endLine !== null) {
+        lines.push(`Lines: ${chunk.startLine}-${chunk.endLine}`);
+      }
+      lines.push(chunk.snippet);
+      return lines.join("\n");
+    }).join("\n\n");
+  }
+
+  private buildPreparedSection(
+    key: string,
+    label: string,
+    body: string,
+    priority: number,
+    required = false,
+  ): PreparedContextSection {
+    return {
+      key,
+      label,
+      body: body.trim(),
+      priority,
+      required,
+      mode: "full",
+    };
+  }
+
+  private renderPreparedSections(sections: PreparedContextSection[]): string {
+    return sections
+      .filter((section) => section.body.trim() !== "")
+      .map((section) => `## ${section.label}\n${section.body.trim()}`)
+      .join("\n\n");
+  }
+
+  private compactText(text: string, limit: number): string {
+    const stripped = text.trim();
+    if (!stripped) {
+      return "";
+    }
+    if (stripped.length <= limit) {
+      return stripped;
+    }
+
+    const suffix = "\n[... summarized]";
+    const available = Math.max(limit - suffix.length, 0);
+    return `${stripped.slice(0, available).trimEnd()}${suffix}`;
+  }
+
+  private summaryLimit(
+    key: string,
+    options: PrepareBoardContextOptions,
+  ): number {
+    return options.sectionSummaryCharLimits?.[key] ?? 600;
+  }
+
+  private minimumSummaryLimit(
+    key: string,
+    options: PrepareBoardContextOptions,
+  ): number {
+    return Math.max(Math.floor(this.summaryLimit(key, options) / 2), 220);
+  }
+
+  private phaseBudgetChars(
+    phase: BoardContextPhase,
+    options: PrepareBoardContextOptions,
+  ): number {
+    const phaseTokens = options.phaseContextTargetTokens?.[phase]
+      ?? (phase === "planning" ? 5200 : phase === "debate" ? 1400 : 1600);
+    const charsPerToken = options.budgetCharsPerToken ?? 4;
+    return phaseTokens * charsPerToken;
+  }
+
+  private budgetPreparedSections(
+    sections: PreparedContextSection[],
+    targetChars: number,
+    options: PrepareBoardContextOptions,
+  ): PreparedContextSection[] {
+    const active = sections
+      .filter((section) => section.body.trim() !== "")
+      .map((section) => ({ ...section }));
+    if (active.length === 0 || this.renderPreparedSections(active).length <= targetChars) {
+      return active;
+    }
+
+    const summarizeSections = (): void => {
+      const sorted = [...active].sort((a, b) => {
+        if (a.priority === b.priority) {
+          return a.label.localeCompare(b.label);
+        }
+        return b.priority - a.priority;
+      });
+
+      for (const section of sorted) {
+        const limit = this.summaryLimit(section.key, options);
+        if (section.body.length <= limit) {
+          continue;
+        }
+        section.body = this.compactText(section.body, limit);
+        section.mode = "summary";
+        if (this.renderPreparedSections(active).length <= targetChars) {
+          return;
+        }
+      }
+    };
+
+    summarizeSections();
+    if (this.renderPreparedSections(active).length <= targetChars) {
+      return active;
+    }
+
+    const sorted = [...active].sort((a, b) => {
+      if (a.priority === b.priority) {
+        return a.label.localeCompare(b.label);
+      }
+      return b.priority - a.priority;
+    });
+
+    for (const section of sorted) {
+      if (this.renderPreparedSections(active).length <= targetChars) {
+        break;
+      }
+      if (section.required) {
+        continue;
+      }
+      section.body = "";
+      section.mode = "omitted";
+    }
+
+    for (const section of sorted) {
+      if (this.renderPreparedSections(active).length <= targetChars) {
+        break;
+      }
+      const minLimit = this.minimumSummaryLimit(section.key, options);
+      if (section.body.length <= minLimit) {
+        continue;
+      }
+      section.body = this.compactText(section.body, minLimit);
+      section.mode = "summary";
+    }
+
+    return active;
+  }
+
+  private sharedSectionsForPhase(
+    phase: BoardContextPhase,
+    builderInput: BoardPromptInput,
+  ): PreparedContextSection[] {
+    switch (phase) {
+      case "planning":
+        return [
+          this.buildPreparedSection("user_request", "User Request", builderInput.user_request, 1, true),
+          this.buildPreparedSection("focused_code_excerpts", "Focused Code Excerpts", builderInput.focused_code_excerpts, 3),
+          this.buildPreparedSection("augment_retrieval_excerpts", "Augment Retrieval Excerpts", builderInput.augment_retrieval_excerpts, 3),
+          this.buildPreparedSection("corpus_reference_excerpts", "Corpus Reference Excerpts", builderInput.corpus_reference_excerpts, 4),
+          this.buildPreparedSection("applicable_coding_standards", "Applicable Coding Standards", builderInput.applicable_coding_standards, 2, true),
+          this.buildPreparedSection("repository_state", "Repository State", builderInput.repository_state, 5),
+          this.buildPreparedSection("project_rules", "Project Rules", builderInput.project_rules, 5),
+          this.buildPreparedSection("referenced_file_paths", "Referenced File Paths", builderInput.referenced_file_paths.join("\n"), 2, true),
+        ];
+      case "debate":
+        return [
+          this.buildPreparedSection("user_request", "User Request", builderInput.user_request, 1, true),
+          this.buildPreparedSection("applicable_coding_standards", "Applicable Coding Standards", builderInput.applicable_coding_standards, 2, true),
+          this.buildPreparedSection("repository_state", "Repository State", builderInput.repository_state, 4),
+          this.buildPreparedSection("referenced_file_paths", "Referenced File Paths", builderInput.referenced_file_paths.join("\n"), 2, true),
+        ];
+      case "synthesis":
+        return [
+          this.buildPreparedSection("user_request", "User Request", builderInput.user_request, 1, true),
+          this.buildPreparedSection("applicable_coding_standards", "Applicable Coding Standards", builderInput.applicable_coding_standards, 2, true),
+          this.buildPreparedSection("repository_state", "Repository State", builderInput.repository_state, 4),
+          this.buildPreparedSection("referenced_file_paths", "Referenced File Paths", builderInput.referenced_file_paths.join("\n"), 2, true),
+        ];
+    }
+  }
+
+  private buildPreparedContextPackages(
+    builderInput: BoardPromptInput,
+    options: PrepareBoardContextOptions,
+  ): Partial<Record<BoardContextPhase, PreparedContextPackage>> {
+    const phases: BoardContextPhase[] = ["planning", "debate", "synthesis"];
+    const packages: Partial<Record<BoardContextPhase, PreparedContextPackage>> = {};
+
+    for (const phase of phases) {
+      const budgetChars = this.phaseBudgetChars(phase, options);
+      packages[phase] = {
+        budget_chars: budgetChars,
+        sections: this.budgetPreparedSections(
+          this.sharedSectionsForPhase(phase, builderInput),
+          budgetChars,
+          options,
+        ),
+      };
+    }
+
+    return packages;
+  }
+
+  private async buildFocusedCodeExcerpts(
+    paths: string[],
+    workspaceRoot: string,
+    maxChars: number,
+  ): Promise<string> {
+    let remainingChars = maxChars;
+    const sections: string[] = [];
+
+    for (const path of paths) {
+      if (remainingChars <= 0) {
+        break;
+      }
+
+      try {
+        const contents = await readFile(resolve(workspaceRoot, path), "utf-8");
+        const numberedContents = contents
+          .split("\n")
+          .map((line, index) => `${String(index + 1).padStart(5)}\t${line}`)
+          .join("\n");
+
+        let section = `Path: ${path}\n${numberedContents}`;
+        if (section.length > remainingChars) {
+          const truncated = section.slice(0, Math.max(remainingChars - 18, 0)).trimEnd();
+          section = `${truncated}\n... [truncated]`;
+        }
+
+        sections.push(section);
+        remainingChars -= section.length + 2;
+      } catch (err) {
+        const section = `Path: ${path}\n[unreadable] ${toErrorMessage(err)}`;
+        if (section.length > remainingChars) {
+          break;
+        }
+        sections.push(section);
+        remainingChars -= section.length + 2;
+      }
+    }
+
+    return sections.join("\n\n");
+  }
+
+  private readOptionalContextFile(workspaceRoot: string, fileName: string): string {
+    const filePath = join(workspaceRoot, fileName);
+    if (!existsSync(filePath)) {
+      return "";
+    }
+    try {
+      return readFileSync(filePath, "utf-8");
+    } catch (err) {
+      return `[unreadable ${fileName}] ${toErrorMessage(err)}`;
+    }
+  }
+
+  private collectProjectRules(workspaceRoot: string, includeLegacyDoc: boolean): string {
+    const sections: string[] = [];
+    const agents = this.readOptionalContextFile(workspaceRoot, "AGENTS.md");
+    if (agents) {
+      sections.push(`File: AGENTS.md\n${agents}`);
+    }
+
+    if (includeLegacyDoc) {
+      const claude = this.readOptionalContextFile(workspaceRoot, "CLAUDE.md");
+      if (claude) {
+        sections.push(`File: CLAUDE.md\n${claude}`);
+      }
+    }
+
+    return sections.join("\n\n");
+  }
+
+  private getRepositoryStateSummary(workspaceRoot: string): string {
+    const status = this.getStatus();
+    const lines = [
+      `Workspace: ${resolve(workspaceRoot)}`,
+      `Session ID: ${status.sessionId ?? "none"}`,
+      `Indexed files: ${status.indexedFiles}`,
+      `Indexing complete: ${status.indexingComplete}`,
+      `Cached search results: ${status.cachedResults}`,
+      `Prepared board contexts: ${status.preparedBoardContexts}`,
+    ];
+
+    try {
+      const gitStatus = execFileSync(
+        "git",
+        ["-C", resolve(workspaceRoot), "status", "--short"],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+      ).trim();
+      lines.push("Git status:");
+      lines.push(gitStatus || "(clean)");
+    } catch {
+      lines.push("Git status: unavailable");
+    }
+
+    return lines.join("\n");
+  }
+
+  private buildBoardArtifact(context: PreparedBoardContext): string {
+    // Use planning section bodies so summarized content is not bypassed.
+    const planSections = context.preparedContextPackages.planning?.sections ?? [];
+    const getSectionBody = (key: string, fallback: string): string => {
+      const section = planSections.find((s) => s.key === key);
+      return section ? section.body : fallback;
+    };
+
+    const sections = [
+      "# Code Review Board Context",
+      `## User Request\n${context.builderInput.user_request}`,
+      `## Repository State\n${context.builderInput.repository_state}`,
+      `## Indexing Summary\n` +
+        `Performed: ${context.indexing.performed}\n` +
+        `File count: ${context.indexing.fileCount}\n` +
+        `Newly uploaded: ${context.indexing.newlyUploaded.length}\n` +
+        `Already cached: ${context.indexing.alreadyUploaded.length}\n` +
+        `Errors: ${context.indexing.errors.length}`,
+      `## Focused Code Excerpts\n${getSectionBody("focused_code_excerpts", context.builderInput.focused_code_excerpts)}`,
+      `## Augment Retrieval Excerpts\n${getSectionBody("augment_retrieval_excerpts", context.builderInput.augment_retrieval_excerpts)}`,
+      `## Referenced File Paths\n${context.builderInput.referenced_file_paths.join("\n")}`,
+    ];
+
+    if (context.builderInput.project_rules) {
+      sections.splice(3, 0, `## Project Rules\n${context.builderInput.project_rules}`);
+    }
+
+    return sections.join("\n\n");
+  }
+
   /**
    * Lazily create or return the existing DirectContext singleton.
    * If workspaceRoot changes, tear down and recreate.
@@ -94,6 +653,7 @@ export class ContextManager {
       this.sessionId = null;
       this.indexingComplete = false;
       this.resultCache.clear();
+      this.boardContextCache.clear();
     }
 
     this.ctx = await DirectContext.create({
@@ -160,6 +720,7 @@ export class ContextManager {
 
     // Explicit cache invalidation — index content changed
     this.resultCache.clear();
+    this.boardContextCache.clear();
     this.indexingComplete = true;
 
     return {
@@ -175,7 +736,12 @@ export class ContextManager {
   async indexDirectory(
     directory: string,
     globPatterns?: string[],
-  ): Promise<{ newlyUploaded: string[]; alreadyUploaded: string[]; fileCount: number }> {
+  ): Promise<{
+    newlyUploaded: string[];
+    alreadyUploaded: string[];
+    errors: string[];
+    fileCount: number;
+  }> {
     const { globSync } = await import("glob");
 
     const absDir = resolve(directory);
@@ -239,6 +805,22 @@ export class ContextManager {
     return { result, cached: false };
   }
 
+  async searchStructured(
+    query: string,
+    maxOutputLength = 20000,
+  ): Promise<StructuredSearchResult> {
+    const { result, cached } = await this.search(query, maxOutputLength);
+    const chunks = this.parseStructuredChunks(result);
+
+    return {
+      query,
+      cached,
+      chunkCount: chunks.length,
+      chunks,
+      rawResult: result,
+    };
+  }
+
   /**
    * Search and ask: combines retrieval with an LLM call via Augment.
    * Requires AUGMENT_API_TOKEN and AUGMENT_API_URL env vars.
@@ -255,8 +837,8 @@ export class ContextManager {
     }
     if (!process.env.AUGMENT_API_TOKEN || !process.env.AUGMENT_API_URL) {
       throw new Error(
-        "searchAndAsk requires AUGMENT_API_TOKEN and AUGMENT_API_URL environment variables. " +
-        "These are read from ~/.augment/session.json by the SDK, but must also be set as env vars for LLM calls.",
+        "searchAndAsk requires AUGMENT_API_TOKEN and AUGMENT_API_URL in the MCP server env. " +
+        "review_search_and_ask does not use the ~/.augment/session.json fallback used by indexing and semantic search.",
       );
     }
     return this.ctx.searchAndAsk(query, prompt);
@@ -264,6 +846,110 @@ export class ContextManager {
 
   getCachedResult(key: string): CachedResult | undefined {
     return this.resultCache.get(key);
+  }
+
+  async prepareBoardContext(options: PrepareBoardContextOptions): Promise<{
+    context: PreparedBoardContext;
+    cached: boolean;
+  }> {
+    const workspaceRoot = resolve(options.workspaceRoot);
+    const normalizedPaths = this.normalizePaths(options.paths ?? [], workspaceRoot);
+    const retrievalQuery = options.retrievalQuery?.trim() || options.userRequest;
+    const maxOutputLength = options.maxOutputLength ?? 12000;
+    const excerptCharLimit = options.excerptCharLimit ?? 16000;
+    const includeLegacyDoc = options.includeLegacyDoc ?? false;
+    const fingerprint = await this.pathFingerprint(normalizedPaths, workspaceRoot);
+    const cacheKey = this.shortHash(JSON.stringify({
+      workspaceRoot,
+      userRequest: options.userRequest,
+      retrievalQuery,
+      paths: normalizedPaths,
+      fingerprint,
+      maxOutputLength,
+      excerptCharLimit,
+      includeLegacyDoc,
+    }));
+
+    const cachedContext = this.boardContextCache.get(cacheKey);
+    if (
+      cachedContext &&
+      this.workspaceRoot === workspaceRoot &&
+      this.indexingComplete
+    ) {
+      return { context: cachedContext, cached: true };
+    }
+
+    let indexing: IndexingSummary;
+    if (normalizedPaths.length > 0) {
+      const indexingResult = await this.indexFiles(normalizedPaths, workspaceRoot);
+      indexing = {
+        performed: true,
+        fileCount: normalizedPaths.length,
+        ...indexingResult,
+      };
+    } else {
+      await this.ensureContext(workspaceRoot);
+      if (!this.indexingComplete) {
+        throw new Error(
+          "No indexed context available for workspace_root. Provide paths to index or resume an existing session first.",
+        );
+      }
+      indexing = {
+        performed: false,
+        fileCount: this.getStatus().indexedFiles,
+        newlyUploaded: [],
+        alreadyUploaded: [],
+        errors: [],
+      };
+    }
+
+    const structuredSearch = await this.searchStructured(retrievalQuery, maxOutputLength);
+    const focusedCodeExcerpts = normalizedPaths.length > 0
+      ? await this.buildFocusedCodeExcerpts(normalizedPaths, workspaceRoot, excerptCharLimit)
+      : this.renderStructuredChunks(structuredSearch.chunks, 4);
+    const augmentRetrievalExcerpts = this.renderStructuredChunks(structuredSearch.chunks, 8)
+      || structuredSearch.rawResult;
+    const projectRules = this.collectProjectRules(workspaceRoot, includeLegacyDoc);
+    const repositoryState = this.getRepositoryStateSummary(workspaceRoot);
+    const referencedFilePaths = normalizedPaths.map((path) => resolve(workspaceRoot, path));
+
+    const builderInput: BoardPromptInput = {
+      user_request: options.userRequest,
+      focused_code_excerpts: focusedCodeExcerpts,
+      augment_retrieval_excerpts: augmentRetrievalExcerpts,
+      corpus_reference_excerpts: "",
+      applicable_coding_standards: "",
+      repository_state: repositoryState,
+      project_rules: projectRules,
+      external_documentation: "",
+      external_documentation_summary: "",
+      cross_repository_patterns: "",
+      cross_repository_patterns_summary: "",
+      referenced_file_paths: referencedFilePaths,
+    };
+    const preparedContextPackages = this.buildPreparedContextPackages(builderInput, options);
+
+    const context: PreparedBoardContext = {
+      workspaceRoot,
+      userRequest: options.userRequest,
+      retrievalQuery,
+      sessionId: this.sessionId,
+      generatedAt: Date.now(),
+      indexing,
+      structuredSearch,
+      builderInput,
+      preparedContextPackages,
+      artifactMarkdown: "",
+    };
+
+    context.artifactMarkdown = this.buildBoardArtifact(context);
+    this.boardContextCache.set(cacheKey, context);
+
+    return { context, cached: false };
+  }
+
+  buildBoardContextPayload(context: PreparedBoardContext, cached: boolean): Record<string, unknown> {
+    return buildBoardContextPayload(context, cached);
   }
 
   listCachedResults(): Array<{ key: string; query: string; timestamp: number }> {
@@ -321,15 +1007,23 @@ export class ContextManager {
     // Atomic writes: temp file + rename
     const metaTmp = `${metaPath}.tmp`;
     const cacheTmp = `${cachePath}.tmp`;
-    const cacheEntries = Array.from(this.resultCache.entries());
+    const persistedCaches: PersistedCaches = {
+      searchResults: Array.from(this.resultCache.entries()),
+      boardContexts: Array.from(this.boardContextCache.entries()),
+    };
 
     await writeFile(metaTmp, JSON.stringify(meta, null, 2));
     await rename(metaTmp, metaPath);
 
-    await writeFile(cacheTmp, JSON.stringify(cacheEntries, null, 2));
+    await writeFile(cacheTmp, JSON.stringify(persistedCaches, null, 2));
     await rename(cacheTmp, cachePath);
 
-    this.log(`Session saved: ${id} (${indexedPaths.length} files, ${cacheEntries.length} cached results)`);
+    this.sessionId = id;
+    this.log(
+      `Session saved: ${id} (${indexedPaths.length} files, ` +
+      `${persistedCaches.searchResults.length} cached searches, ` +
+      `${persistedCaches.boardContexts?.length ?? 0} board contexts)`,
+    );
     return id;
   }
 
@@ -378,13 +1072,27 @@ export class ContextManager {
 
     // Restore result cache (graceful on missing/corrupt)
     this.resultCache.clear();
+    this.boardContextCache.clear();
     if (existsSync(cachePath)) {
       try {
-        const entries: Array<[string, CachedResult]> = JSON.parse(
+        const parsed: PersistedCaches | Array<[string, CachedResult]> = JSON.parse(
           readFileSync(cachePath, "utf-8"),
         );
-        for (const [key, value] of entries) {
+
+        const searchEntries = Array.isArray(parsed)
+          ? parsed
+          : Array.isArray(parsed.searchResults)
+            ? parsed.searchResults
+            : [];
+        for (const [key, value] of searchEntries) {
           this.resultCache.set(key, value);
+        }
+
+        const boardEntries = !Array.isArray(parsed) && Array.isArray(parsed.boardContexts)
+          ? parsed.boardContexts
+          : [];
+        for (const [key, value] of boardEntries) {
+          this.boardContextCache.set(key, value);
         }
       } catch {
         this.log(`Corrupt cache file for session ${sessionId}, starting with empty cache`);
@@ -456,6 +1164,7 @@ export class ContextManager {
     indexedFiles: number;
     indexingComplete: boolean;
     cachedResults: number;
+    preparedBoardContexts: number;
   } {
     let indexedFiles = 0;
     if (this.ctx) {
@@ -473,6 +1182,7 @@ export class ContextManager {
       indexedFiles,
       indexingComplete: this.indexingComplete,
       cachedResults: this.resultCache.size,
+      preparedBoardContexts: this.boardContextCache.size,
     };
   }
 
@@ -489,5 +1199,6 @@ export class ContextManager {
     this.workspaceRoot = null;
     this.indexingComplete = false;
     this.resultCache.clear();
+    this.boardContextCache.clear();
   }
 }

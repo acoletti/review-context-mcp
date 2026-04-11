@@ -29,7 +29,9 @@ Add this to `~/.claude/settings.json` under `mcpServers`:
 }
 ```
 
-Authentication falls back to `~/.augment/session.json` automatically (created by `auggie login`). No extra env vars needed.
+Indexing and semantic search authentication fall back to `~/.augment/session.json` automatically (created by `auggie login`). No extra env vars are needed for those tool paths.
+
+If you want to use `review_search_and_ask`, also set `AUGMENT_API_TOKEN` and `AUGMENT_API_URL` in the MCP `env` block. That tool's Augment LLM call does not use the `~/.augment/session.json` fallback used by indexing and semantic search.
 
 To enable debug logging, add `"REVIEW_CONTEXT_DEBUG": "true"` to the `env` block.
 
@@ -42,9 +44,11 @@ Restart Claude Code, then run: `review_status` — should show `Active: false`.
 | Tool | Purpose | When to Use |
 |------|---------|-------------|
 | `review_index_files` | Index specific files | Start of code review — index only files relevant to the change |
-| `review_index_directory` | Index a whole directory | When the review scope is broad |
+| `review_index_directory` | Index a whole directory | When the review scope is broad; unreadable or oversized files are reported in the response |
 | `review_search` | Semantic search with caching | Phase 1 context gathering — results are cached for reuse |
-| `review_search_and_ask` | Search + Augment LLM reasoning | Quick architectural questions during review |
+| `review_search_structured` | Structured semantic search | When the orchestrator wants reusable chunk IDs, file paths, and line ranges instead of one large text blob |
+| `review_search_and_ask` | Search + Augment LLM reasoning | Quick architectural questions during review; requires `AUGMENT_API_TOKEN` and `AUGMENT_API_URL` in the MCP env |
+| `review_prepare_board_context` | Build a reusable review-board context bundle | When preparing Full/Slim context packages for `code-review-board` or similar multi-agent review workflows |
 | `review_save_session` | Persist index + cache to disk | After Phase 1, so follow-up reviews skip re-indexing |
 | `review_resume_session` | Restore a saved session | When re-running a review on the same codebase |
 | `review_list_sessions` | List saved sessions | Before resuming to find the right session ID |
@@ -63,18 +67,21 @@ Claude Code ──stdio──▶ review-context-mcp
                            │   │   ├─ addToIndex() → Augment backend
                            │   │   ├─ search() → Augment backend
                            │   │   └─ exportToFile() / importFromFile()
-                           │   └─ Result cache (Map, persisted to JSON)
+                           │   ├─ Result cache (Map, persisted to JSON)
+                           │   └─ Board context cache (Map, persisted to JSON)
                            │
                            └─ Session storage: ~/.claude/review-cache/
                                ├─ {id}.state.json  (Augment index state)
                                ├─ {id}.meta.json   (session metadata)
-                               └─ {id}.cache.json  (cached search results)
+                               └─ {id}.cache.json  (cached search results + board bundles)
 ```
 
 ## Key Design Decisions
 
 - **Selective indexing**: Unlike `codebase-retrieval` which indexes the whole workspace, this server lets you index only the files relevant to a review. Smaller index = more relevant results = fewer tokens.
 - **Result caching**: Search results are cached in-memory by query+maxOutputLength hash. Identical queries across phases return instantly from cache.
+- **Structured retrieval**: `review_search_structured` parses the cached retrieval output into reusable chunks with stable IDs, file paths, and line ranges.
+- **Board bundle caching**: `review_prepare_board_context` builds and caches a reusable context bundle for `code-review-board`, keyed by request + file fingerprint so unchanged reviews can skip repeated setup work.
 - **Session persistence**: `exportToFile`/`importFromFile` persists the Augment index state — resuming a session does not re-upload files to the backend.
 - **Output size control**: `max_output_length` parameter (1K–80K chars) lets the orchestrator tune result size per phase — smaller for debate rounds, larger for initial context gathering.
 
