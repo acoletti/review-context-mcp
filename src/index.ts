@@ -377,26 +377,33 @@ server.tool(
   "List all saved review sessions with their metadata.",
   {},
   async () => {
-    const sessions = manager.listSessions();
-    if (sessions.length === 0) {
+    try {
+      const sessions = await manager.listSessions();
+      if (sessions.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "No saved sessions found." }],
+        };
+      }
+
+      const lines = sessions.map((s) => {
+        const date = new Date(s.createdAt).toISOString();
+        return `  ${s.sessionId} | ${date} | ${s.indexedPaths.length} files | ${s.workspaceRoot}`;
+      });
+
       return {
-        content: [{ type: "text" as const, text: "No saved sessions found." }],
+        content: [
+          {
+            type: "text" as const,
+            text: `Saved sessions:\n${lines.join("\n")}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
+        isError: true,
       };
     }
-
-    const lines = sessions.map((s) => {
-      const date = new Date(s.createdAt).toISOString();
-      return `  ${s.sessionId} | ${date} | ${s.indexedPaths.length} files | ${s.workspaceRoot}`;
-    });
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Saved sessions:\n${lines.join("\n")}`,
-        },
-      ],
-    };
   },
 );
 
@@ -438,22 +445,29 @@ server.tool(
     "number of indexed files, cached search results, and prepared board contexts.",
   {},
   async () => {
-    const status = manager.getStatus();
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text:
-            `Active: ${status.active}\n` +
-            `Session ID: ${status.sessionId ?? "none"}\n` +
-            `Workspace: ${status.workspaceRoot ?? "none"}\n` +
-            `Indexed files: ${status.indexedFiles}\n` +
-            `Indexing complete: ${status.indexingComplete}\n` +
-            `Cached results: ${status.cachedResults}\n` +
-            `Prepared board contexts: ${status.preparedBoardContexts}`,
-        },
-      ],
-    };
+    try {
+      const status = manager.getStatus();
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `Active: ${status.active}\n` +
+              `Session ID: ${status.sessionId ?? "none"}\n` +
+              `Workspace: ${status.workspaceRoot ?? "none"}\n` +
+              `Indexed files: ${status.indexedFiles}\n` +
+              `Indexing complete: ${status.indexingComplete}\n` +
+              `Cached results: ${status.cachedResults}\n` +
+              `Prepared board contexts: ${status.preparedBoardContexts}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
+        isError: true,
+      };
+    }
   },
 );
 
@@ -465,26 +479,33 @@ server.tool(
     "Shows query text and cache key for each result.",
   {},
   async () => {
-    const entries = manager.listCachedResults();
-    if (entries.length === 0) {
+    try {
+      const entries = manager.listCachedResults();
+      if (entries.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "No cached results." }],
+        };
+      }
+
+      const lines = entries.map((e) => {
+        const date = new Date(e.timestamp).toISOString();
+        return `  ${e.key} | ${date} | ${e.query.slice(0, 80)}`;
+      });
+
       return {
-        content: [{ type: "text" as const, text: "No cached results." }],
+        content: [
+          {
+            type: "text" as const,
+            text: `Cached results (${entries.length}):\n${lines.join("\n")}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
+        isError: true,
       };
     }
-
-    const lines = entries.map((e) => {
-      const date = new Date(e.timestamp).toISOString();
-      return `  ${e.key} | ${date} | ${e.query.slice(0, 80)}`;
-    });
-
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: `Cached results (${entries.length}):\n${lines.join("\n")}`,
-        },
-      ],
-    };
   },
 );
 

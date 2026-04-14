@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -346,4 +346,200 @@ test("prepareBoardContext transport payload stays within 80 KB when excerpts are
       "builder_input.augment_retrieval_excerpts must use the summarized planning section body",
     );
   }
+});
+
+test("listSessions returns sessions sorted by createdAt descending", async (t) => {
+  const sessionDir = join(CACHE_DIR);
+  const id1 = `test-list-${randomUUID()}`;
+  const id2 = `test-list-${randomUUID()}`;
+
+  t.after(async () => {
+    await Promise.all([
+      rm(join(sessionDir, `${id1}.meta.json`), { force: true }),
+      rm(join(sessionDir, `${id2}.meta.json`), { force: true }),
+    ]);
+  });
+
+  await writeFile(join(sessionDir, `${id1}.meta.json`), JSON.stringify({
+    sessionId: id1, createdAt: 1000, indexedPaths: [], workspaceRoot: "/tmp",
+  }));
+  await writeFile(join(sessionDir, `${id2}.meta.json`), JSON.stringify({
+    sessionId: id2, createdAt: 2000, indexedPaths: ["a.ts"], workspaceRoot: "/tmp",
+  }));
+
+  const manager = new ContextManager(false);
+  const sessions = await manager.listSessions();
+  const ids = sessions.map((s) => s.sessionId);
+  assert.ok(ids.includes(id1));
+  assert.ok(ids.includes(id2));
+  const idx1 = ids.indexOf(id1);
+  const idx2 = ids.indexOf(id2);
+  assert.ok(idx2 < idx1, "newer session (id2) should come before older (id1)");
+});
+
+test("listSessions skips corrupt meta files gracefully", async (t) => {
+  const id = `test-corrupt-${randomUUID()}`;
+  const metaPath = join(CACHE_DIR, `${id}.meta.json`);
+
+  t.after(async () => {
+    await rm(metaPath, { force: true });
+  });
+
+  await writeFile(metaPath, "not valid json{{{");
+
+  const manager = new ContextManager(false);
+  const sessions = await manager.listSessions();
+  const ids = sessions.map((s) => s.sessionId);
+  assert.ok(!ids.includes(id), "corrupt meta should be skipped");
+});
+
+test("resumeSession with empty workspaceRoot in meta stores null internally", async (t) => {
+  const sessionId = `test-empty-ws-${randomUUID()}`;
+  const statePath = join(CACHE_DIR, `${sessionId}.state.json`);
+  const metaPath = join(CACHE_DIR, `${sessionId}.meta.json`);
+  const cachePath = join(CACHE_DIR, `${sessionId}.cache.json`);
+
+  t.after(async () => {
+    await Promise.all([
+      rm(statePath, { force: true }),
+      rm(metaPath, { force: true }),
+      rm(cachePath, { force: true }),
+    ]);
+  });
+
+  writeFileSync(statePath, "{}");
+  await writeFile(metaPath, JSON.stringify({
+    sessionId, createdAt: Date.now(), indexedPaths: [], workspaceRoot: "",
+  }));
+  await writeFile(cachePath, JSON.stringify({ searchResults: [], boardContexts: [] }));
+
+  const manager = new ContextManager(false);
+  manager.ctx = null;
+
+  // Stub importFromFile to avoid real SDK call
+  const origImport = (await import("@augmentcode/auggie-sdk")).DirectContext.importFromFile;
+  const { DirectContext } = await import("@augmentcode/auggie-sdk");
+  DirectContext.importFromFile = async () => ({ getIndexedPaths: () => [] });
+
+  t.after(() => { DirectContext.importFromFile = origImport; });
+
+  const info = await manager.resumeSession(sessionId);
+  assert.equal(info.workspaceRoot, "", "returned workspaceRoot should be empty string");
+  assert.equal(manager.getStatus().workspaceRoot, null, "internal workspaceRoot should be null");
+});
+
+test("resultCache evicts oldest entries via FIFO when exceeding limit", async () => {
+  const manager = new ContextManager(false);
+  let callCount = 0;
+
+  manager.ctx = {
+    async search(query) {
+      callCount += 1;
+      return `result for ${query}`;
+    },
+  };
+  manager.indexingComplete = true;
+
+  // Pre-populate the result cache to just below the 500 limit
+  for (let i = 0; i < 500; i++) {
+    manager.resultCache.set(`prefill-${i}`, {
+      query: `query-${i}`,
+      result: `result-${i}`,
+      timestamp: Date.now(),
+      maxOutputLength: 20000,
+    });
+  }
+  assert.equal(manager.resultCache.size, 500);
+
+  // Trigger 3 new searches — each should evict the oldest entry
+  await manager.search("overflow-a", 20000);
+  await manager.search("overflow-b", 20000);
+  await manager.search("overflow-c", 20000);
+
+  assert.equal(manager.resultCache.size, 500, "cache should stay at 500");
+  assert.equal(callCount, 3, "should have made 3 real search calls");
+
+  // The 3 oldest prefilled entries should have been evicted
+  assert.ok(!manager.resultCache.has("prefill-0"), "oldest entry should be evicted");
+  assert.ok(!manager.resultCache.has("prefill-1"), "second oldest should be evicted");
+  assert.ok(!manager.resultCache.has("prefill-2"), "third oldest should be evicted");
+
+  // The newer entries should still be present
+  assert.ok(manager.resultCache.has("prefill-499"), "newest prefilled entry should remain");
+});
+
+test("boardContextCache evicts oldest entry when exceeding limit", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "review-board-eviction-"));
+
+  t.after(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  await writeFile(join(directory, "a.ts"), "export const a = 1;\n");
+
+  const manager = new ContextManager(false);
+  const stubContext = {
+    async addToIndex(files) {
+      return { newlyUploaded: files.map((f) => f.path), alreadyUploaded: [] };
+    },
+    async search() {
+      return "Path: a.ts\n     1\texport const a = 1;";
+    },
+  };
+
+  manager.ensureContext = async (workspaceRoot) => {
+    manager.ctx = stubContext;
+    manager.workspaceRoot = resolve(workspaceRoot);
+    return stubContext;
+  };
+
+  // Fill cache with unique requests to create distinct cache keys
+  for (let i = 0; i < 52; i++) {
+    await manager.prepareBoardContext({
+      workspaceRoot: directory,
+      userRequest: `Review request ${i}`,
+      paths: ["a.ts"],
+      maxOutputLength: 12000,
+      excerptCharLimit: 4000,
+    });
+  }
+
+  const status = manager.getStatus();
+  assert.ok(
+    status.preparedBoardContexts <= 50,
+    `Board cache should be capped at 50, got ${status.preparedBoardContexts}`,
+  );
+});
+
+test("deleteSession does not throw on non-existent session", async () => {
+  const id = `test-delete-missing-${randomUUID()}`;
+  const manager = new ContextManager(false);
+  const result = await manager.deleteSession(id);
+  assert.equal(result, false, "should return false when no files existed");
+});
+
+test("listSessions returns partial results when one meta file is unreadable", async (t) => {
+  const goodId = `test-partial-good-${randomUUID()}`;
+  const badId = `test-partial-bad-${randomUUID()}`;
+  const goodPath = join(CACHE_DIR, `${goodId}.meta.json`);
+  const badPath = join(CACHE_DIR, `${badId}.meta.json`);
+
+  await writeFile(goodPath, JSON.stringify({
+    sessionId: goodId, createdAt: 1000, indexedPaths: [], workspaceRoot: "/tmp",
+  }));
+  await writeFile(badPath, JSON.stringify({
+    sessionId: badId, createdAt: 2000, indexedPaths: [], workspaceRoot: "/tmp",
+  }));
+  await chmod(badPath, 0o000);
+
+  t.after(async () => {
+    await chmod(badPath, 0o644).catch(() => {});
+    await Promise.all([rm(goodPath, { force: true }), rm(badPath, { force: true })]);
+  });
+
+  const manager = new ContextManager(false);
+  const sessions = await manager.listSessions();
+  const ids = sessions.map((s) => s.sessionId);
+  assert.ok(ids.includes(goodId), "readable session should be returned");
+  assert.ok(!ids.includes(badId), "unreadable session should be skipped");
 });

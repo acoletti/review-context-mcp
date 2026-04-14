@@ -14,7 +14,7 @@
     "test": "npm run build && node --test test/*.test.js"
   },
   "dependencies": {
-    "@augmentcode/auggie-sdk": "^0.1.15",
+    "@augmentcode/auggie-sdk": "~0.1.15",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "glob": "^13.0.6",
     "zod": "^3.25.76"

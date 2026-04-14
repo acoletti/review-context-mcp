@@ -1,10 +1,13 @@
 import { DirectContext, type File, type IndexingResult } from "@augmentcode/auggie-sdk";
-import { execFileSync } from "child_process";
-import { readFile, writeFile, rename, unlink, stat } from "fs/promises";
-import { readFileSync, existsSync, mkdirSync, readdirSync } from "fs";
+import { execFile } from "child_process";
+import { readFile, writeFile, rename, unlink, stat, readdir } from "fs/promises";
+import { mkdirSync } from "fs";
 import { join, resolve, relative } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 const CACHE_DIR = join(
   homedir(),
@@ -13,7 +16,8 @@ const CACHE_DIR = join(
 );
 
 const MAX_FILE_SIZE_BYTES = 1_000_000; // 1MB — SDK limit
-const MAX_CACHE_ENTRIES = 500;
+const MAX_CACHE_ENTRIES = 500; // FIFO eviction — oldest entry by insertion order
+const MAX_BOARD_CACHE_ENTRIES = 50; // FIFO eviction — board contexts are larger per entry
 
 interface CachedResult {
   query: string;
@@ -120,6 +124,10 @@ interface PrepareBoardContextOptions {
 
 export function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function isEnoent(err: unknown): boolean {
+  return err instanceof Error && "code" in err && (err as { code: string }).code === "ENOENT";
 }
 
 export const TRANSPORT_MAX_BYTES = 80_000;
@@ -544,27 +552,25 @@ export class ContextManager {
     return sections.join("\n\n");
   }
 
-  private readOptionalContextFile(workspaceRoot: string, fileName: string): string {
+  private async readOptionalContextFile(workspaceRoot: string, fileName: string): Promise<string> {
     const filePath = join(workspaceRoot, fileName);
-    if (!existsSync(filePath)) {
-      return "";
-    }
     try {
-      return readFileSync(filePath, "utf-8");
-    } catch (err) {
+      return await readFile(filePath, "utf-8");
+    } catch (err: unknown) {
+      if (isEnoent(err)) return "";
       return `[unreadable ${fileName}] ${toErrorMessage(err)}`;
     }
   }
 
-  private collectProjectRules(workspaceRoot: string, includeLegacyDoc: boolean): string {
+  private async collectProjectRules(workspaceRoot: string, includeLegacyDoc: boolean): Promise<string> {
     const sections: string[] = [];
-    const agents = this.readOptionalContextFile(workspaceRoot, "AGENTS.md");
+    const agents = await this.readOptionalContextFile(workspaceRoot, "AGENTS.md");
     if (agents) {
       sections.push(`File: AGENTS.md\n${agents}`);
     }
 
     if (includeLegacyDoc) {
-      const claude = this.readOptionalContextFile(workspaceRoot, "CLAUDE.md");
+      const claude = await this.readOptionalContextFile(workspaceRoot, "CLAUDE.md");
       if (claude) {
         sections.push(`File: CLAUDE.md\n${claude}`);
       }
@@ -573,7 +579,7 @@ export class ContextManager {
     return sections.join("\n\n");
   }
 
-  private getRepositoryStateSummary(workspaceRoot: string): string {
+  private async getRepositoryStateSummary(workspaceRoot: string): Promise<string> {
     const status = this.getStatus();
     const lines = [
       `Workspace: ${resolve(workspaceRoot)}`,
@@ -585,13 +591,13 @@ export class ContextManager {
     ];
 
     try {
-      const gitStatus = execFileSync(
+      const { stdout } = await execFileAsync(
         "git",
         ["-C", resolve(workspaceRoot), "status", "--short"],
-        { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-      ).trim();
+        { encoding: "utf-8", timeout: 10_000 },
+      );
       lines.push("Git status:");
-      lines.push(gitStatus || "(clean)");
+      lines.push(stdout.trim() || "(clean)");
     } catch {
       lines.push("Git status: unavailable");
     }
@@ -742,13 +748,13 @@ export class ContextManager {
     errors: string[];
     fileCount: number;
   }> {
-    const { globSync } = await import("glob");
+    const { glob } = await import("glob");
 
     const absDir = resolve(directory);
     const patterns = globPatterns ?? ["**/*.{ts,tsx,js,jsx,py,go,rs,java,rb,md,json,yaml,yml,toml}"];
     const allFiles: string[] = [];
     for (const pattern of patterns) {
-      const matches = globSync(pattern, {
+      const matches = await glob(pattern, {
         cwd: absDir,
         nodir: true,
         ignore: ["**/node_modules/**", "**/dist/**", "**/.git/**", "**/venv/**", "**/__pycache__/**"],
@@ -797,9 +803,10 @@ export class ContextManager {
     });
 
     // Simple cache size threshold
-    if (this.resultCache.size > MAX_CACHE_ENTRIES) {
+    while (this.resultCache.size > MAX_CACHE_ENTRIES) {
       const firstKey = this.resultCache.keys().next().value;
       if (firstKey !== undefined) this.resultCache.delete(firstKey);
+      else break;
     }
 
     return { result, cached: false };
@@ -909,8 +916,8 @@ export class ContextManager {
       : this.renderStructuredChunks(structuredSearch.chunks, 4);
     const augmentRetrievalExcerpts = this.renderStructuredChunks(structuredSearch.chunks, 8)
       || structuredSearch.rawResult;
-    const projectRules = this.collectProjectRules(workspaceRoot, includeLegacyDoc);
-    const repositoryState = this.getRepositoryStateSummary(workspaceRoot);
+    const projectRules = await this.collectProjectRules(workspaceRoot, includeLegacyDoc);
+    const repositoryState = await this.getRepositoryStateSummary(workspaceRoot);
     const referencedFilePaths = normalizedPaths.map((path) => resolve(workspaceRoot, path));
 
     const builderInput: BoardPromptInput = {
@@ -944,6 +951,12 @@ export class ContextManager {
 
     context.artifactMarkdown = this.buildBoardArtifact(context);
     this.boardContextCache.set(cacheKey, context);
+
+    while (this.boardContextCache.size > MAX_BOARD_CACHE_ENTRIES) {
+      const firstKey = this.boardContextCache.keys().next().value;
+      if (firstKey !== undefined) this.boardContextCache.delete(firstKey);
+      else break;
+    }
 
     return { context, cached: false };
   }
@@ -988,13 +1001,11 @@ export class ContextManager {
 
     // Preserve createdAt from existing metadata
     let createdAt = Date.now();
-    if (existsSync(metaPath)) {
-      try {
-        const existing: SessionMeta = JSON.parse(readFileSync(metaPath, "utf-8"));
-        createdAt = existing.createdAt;
-      } catch {
-        // Corrupt meta — use current time
-      }
+    try {
+      const existing: SessionMeta = JSON.parse(await readFile(metaPath, "utf-8"));
+      createdAt = existing.createdAt;
+    } catch {
+      // Missing or corrupt meta — use current time
     }
 
     const meta: SessionMeta = {
@@ -1040,7 +1051,10 @@ export class ContextManager {
     const metaPath = this.sessionMetaPath(sessionId);
     const cachePath = this.sessionCachePath(sessionId);
 
-    if (!existsSync(statePath)) {
+    // Verify state file exists before attempting import
+    try {
+      await stat(statePath);
+    } catch {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
@@ -1059,44 +1073,53 @@ export class ContextManager {
       indexedPaths: [],
       workspaceRoot: "",
     };
-    if (existsSync(metaPath)) {
-      try {
-        meta = JSON.parse(readFileSync(metaPath, "utf-8"));
-      } catch {
-        this.log(`Corrupt meta file for session ${sessionId}, using defaults`);
-      }
+    try {
+      meta = JSON.parse(await readFile(metaPath, "utf-8"));
+    } catch {
+      this.log(`Missing or corrupt meta file for session ${sessionId}, using defaults`);
     }
     // Always set workspaceRoot from meta (possibly the default fallback)
     // so it is never left null after a resume
     this.workspaceRoot = meta.workspaceRoot || null;
 
-    // Restore result cache (graceful on missing/corrupt)
+    // Restore result cache (graceful on missing/corrupt).
+    // Map iterates in insertion order (ES2015); FIFO eviction evicts oldest-serialized entry.
     this.resultCache.clear();
     this.boardContextCache.clear();
-    if (existsSync(cachePath)) {
-      try {
-        const parsed: PersistedCaches | Array<[string, CachedResult]> = JSON.parse(
-          readFileSync(cachePath, "utf-8"),
-        );
+    try {
+      const parsed: PersistedCaches | Array<[string, CachedResult]> = JSON.parse(
+        await readFile(cachePath, "utf-8"),
+      );
 
-        const searchEntries = Array.isArray(parsed)
-          ? parsed
-          : Array.isArray(parsed.searchResults)
-            ? parsed.searchResults
-            : [];
-        for (const [key, value] of searchEntries) {
-          this.resultCache.set(key, value);
-        }
-
-        const boardEntries = !Array.isArray(parsed) && Array.isArray(parsed.boardContexts)
-          ? parsed.boardContexts
+      const searchEntries = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed.searchResults)
+          ? parsed.searchResults
           : [];
-        for (const [key, value] of boardEntries) {
-          this.boardContextCache.set(key, value);
-        }
-      } catch {
-        this.log(`Corrupt cache file for session ${sessionId}, starting with empty cache`);
+      for (const [key, value] of searchEntries) {
+        this.resultCache.set(key, value);
       }
+
+      const boardEntries = !Array.isArray(parsed) && Array.isArray(parsed.boardContexts)
+        ? parsed.boardContexts
+        : [];
+      for (const [key, value] of boardEntries) {
+        this.boardContextCache.set(key, value);
+      }
+    } catch {
+      this.log(`Missing or corrupt cache file for session ${sessionId}, starting with empty cache`);
+    }
+
+    // Enforce caps in case limits were lowered since the session was saved
+    while (this.resultCache.size > MAX_CACHE_ENTRIES) {
+      const firstKey = this.resultCache.keys().next().value;
+      if (firstKey !== undefined) this.resultCache.delete(firstKey);
+      else break;
+    }
+    while (this.boardContextCache.size > MAX_BOARD_CACHE_ENTRIES) {
+      const firstKey = this.boardContextCache.keys().next().value;
+      if (firstKey !== undefined) this.boardContextCache.delete(firstKey);
+      else break;
     }
 
     this.log(`Session resumed: ${sessionId}`);
@@ -1104,25 +1127,30 @@ export class ContextManager {
     return {
       indexedFiles: meta.indexedPaths.length,
       cachedResults: this.resultCache.size,
-      workspaceRoot: meta.workspaceRoot,
+      workspaceRoot: this.workspaceRoot ?? "",
     };
   }
 
-  listSessions(): SessionMeta[] {
+  async listSessions(): Promise<SessionMeta[]> {
     const sessions: SessionMeta[] = [];
 
     try {
-      const files = readdirSync(CACHE_DIR);
-      for (const file of files) {
-        if (file.endsWith(".meta.json")) {
-          try {
-            const meta: SessionMeta = JSON.parse(
-              readFileSync(join(CACHE_DIR, file), "utf-8"),
-            );
-            sessions.push(meta);
-          } catch {
-            // Skip corrupt meta files
-          }
+      const files = await readdir(CACHE_DIR);
+      const metaFiles = files.filter((file: string) => file.endsWith(".meta.json"));
+      const results = await Promise.allSettled(
+        metaFiles.map(async (file: string) => {
+          const meta: SessionMeta = JSON.parse(
+            await readFile(join(CACHE_DIR, file), "utf-8"),
+          );
+          if (meta.sessionId && meta.createdAt) return meta;
+          return null;
+        }),
+      );
+      for (const result of results) {
+        if (result.status === "fulfilled" && result.value) {
+          sessions.push(result.value);
+        } else if (result.status === "rejected") {
+          this.log(`Skipping unreadable session file: ${toErrorMessage(result.reason)}`);
         }
       }
     } catch {
@@ -1140,12 +1168,12 @@ export class ContextManager {
       this.sessionMetaPath(sessionId),
       this.sessionCachePath(sessionId),
     ]) {
-      if (existsSync(filePath)) {
-        try {
-          await unlink(filePath);
-          deleted = true;
-        } catch {
-          // Best-effort cleanup
+      try {
+        await unlink(filePath);
+        deleted = true;
+      } catch (err) {
+        if (!isEnoent(err)) {
+          this.log(`Warning: failed to delete ${filePath}: ${toErrorMessage(err)}`);
         }
       }
     }
