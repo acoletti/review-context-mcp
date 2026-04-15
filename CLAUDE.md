@@ -6,11 +6,17 @@ Session-aware MCP server wrapping Augment's Context Engine SDK for multi-phase c
 
 ### 1. Install and build
 
+On **each machine** (first time only):
+
 ```bash
 cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/review-context-mcp
 npm install
 npm run build
 ```
+
+> **Multi-machine (iCloud):** The `start.sh` launcher auto-installs missing `node_modules` and
+> auto-rebuilds a stale `dist` when source files are newer. This means the server is self-healing
+> after iCloud syncs source changes from another machine. No manual rebuild needed day-to-day.
 
 ### 2. Add to Claude Code
 
@@ -22,7 +28,7 @@ Add this to `~/.claude/settings.json` under `mcpServers`:
     "review-context": {
       "type": "stdio",
       "command": "/bin/sh",
-      "args": ["-c", "exec node \"$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/dist/index.js\""],
+      "args": ["-c", "exec \"$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/start.sh\""],
       "env": {}
     }
   }
