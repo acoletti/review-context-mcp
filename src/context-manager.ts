@@ -178,7 +178,7 @@ export function buildBoardContextPayload(
 
   // Final transport-size guard: drop artifact_markdown if payload is over budget
   // (artifact_markdown is a rendering of prepared_context_packages.planning sections)
-  if (JSON.stringify(payload).length > TRANSPORT_MAX_BYTES) {
+  if (Buffer.byteLength(JSON.stringify(payload), "utf8") > TRANSPORT_MAX_BYTES) {
     delete payload.artifact_markdown;
   }
 
@@ -682,10 +682,15 @@ export class ContextManager {
     this.indexingComplete = false;
     const ctx = await this.ensureContext(workspaceRoot);
 
-    this.sessionId = createHash("sha256")
-      .update(`${Date.now()}:${paths.join(",")}`)
-      .digest("hex")
-      .slice(0, 12);
+    // Only generate a new session ID if one isn't already active.
+    // ensureContext resets sessionId when workspace changes, so this
+    // guard prevents clobbering the ID on repeated indexFiles calls.
+    if (!this.sessionId) {
+      this.sessionId = createHash("sha256")
+        .update(`${Date.now()}:${paths.join(",")}`)
+        .digest("hex")
+        .slice(0, 12);
+    }
 
     const files: File[] = [];
     const errors: string[] = [];
