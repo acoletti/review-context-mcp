@@ -121,7 +121,7 @@ server.tool(
       .min(1000)
       .max(80000)
       .optional()
-      .describe("Maximum character length of results (default: 20000, max: 80000). " +
+      .describe("Maximum character length of Augment retrieval results (default: 20000, max: 80000). " +
         "Use lower values for focused queries, higher for broad context gathering."),
   },
   async ({ query, max_output_length }) => {
@@ -155,7 +155,7 @@ server.tool(
       .min(1000)
       .max(80000)
       .optional()
-      .describe("Maximum character length of results to request before chunk parsing."),
+      .describe("Maximum character length of Augment retrieval results to request before chunk parsing."),
     include_raw: z
       .boolean()
       .optional()
@@ -243,7 +243,7 @@ server.tool(
       .min(1000)
       .max(80000)
       .optional()
-      .describe("Maximum character length for the retrieval pass."),
+      .describe("Maximum character length for the Augment retrieval pass (characters, not bytes)."),
     excerpt_char_limit: z
       .number()
       .min(1000)
@@ -274,17 +274,19 @@ server.tool(
       .describe("Include CLAUDE.md in project_rules when present."),
     offset: z
       .number()
+      .int()
       .min(0)
       .optional()
-      .describe("Character offset for paginated retrieval. When provided with limit, " +
+      .describe("Byte offset for paginated retrieval. When provided with limit, " +
         "returns a chunk of the serialized payload instead of the full result. " +
-        "Use this to retrieve large payloads that exceed the transport token limit."),
+        "Use this to retrieve large payloads that exceed the transport byte limit."),
     limit: z
       .number()
+      .int()
       .min(1000)
       .max(40000)
       .optional()
-      .describe("Maximum characters to return per chunk (default: 40000, max: 40000). " +
+      .describe("Maximum bytes to return per chunk (default: 40000, max: 40000). " +
         "Use with offset for paginated retrieval of large payloads."),
   },
   async ({

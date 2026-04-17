@@ -588,6 +588,19 @@ test("paginateBoardContextPayload clamps offset past end of data", () => {
   assert.equal(envelope.chunk, "");
 });
 
+test("paginateBoardContextPayload returns empty chunk at exact byte boundary", () => {
+  const payload = { data: "hello world" };
+  const totalBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+  const result = paginateBoardContextPayload(payload, totalBytes, 4000);
+  assert.equal(result.pagination.total_bytes, totalBytes);
+  assert.equal(result.pagination.offset, totalBytes);
+  assert.equal(result.pagination.has_more, false);
+  assert.equal(result.pagination.bytes_in_chunk, 0);
+  const envelope = JSON.parse(result.content[0].text);
+  assert.equal(envelope.chunk, "");
+});
+
 test("buildBoardContextPayload replaces builder_input excerpt fields with planning section bodies", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "review-board-trim-"));
 

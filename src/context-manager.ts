@@ -225,6 +225,7 @@ export function buildBoardContextPayload(
     delete packages.debate;
     delete packages.synthesis;
     payload.prepared_context_packages = packages;
+    bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
   }
 
   return payload;
