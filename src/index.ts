@@ -3,10 +3,20 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ContextManager, toErrorMessage, buildBoardContextPayload } from "./context-manager.js";
+import { ContextManager, toErrorMessage, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "./context-manager.js";
 
 const debug = process.env.REVIEW_CONTEXT_DEBUG === "true";
 const manager = new ContextManager(debug);
+
+function formatAge(ms: number): string {
+  if (ms <= 0) return "unknown";
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h ago`;
+}
 
 const server = new McpServer({
   name: "review-context",
@@ -262,6 +272,20 @@ server.tool(
       .boolean()
       .optional()
       .describe("Include CLAUDE.md in project_rules when present."),
+    offset: z
+      .number()
+      .min(0)
+      .optional()
+      .describe("Character offset for paginated retrieval. When provided with limit, " +
+        "returns a chunk of the serialized payload instead of the full result. " +
+        "Use this to retrieve large payloads that exceed the transport token limit."),
+    limit: z
+      .number()
+      .min(1000)
+      .max(40000)
+      .optional()
+      .describe("Maximum characters to return per chunk (default: 40000, max: 40000). " +
+        "Use with offset for paginated retrieval of large payloads."),
   },
   async ({
     workspace_root,
@@ -274,6 +298,8 @@ server.tool(
     phase_context_target_tokens,
     section_summary_char_limits,
     include_legacy_doc,
+    offset,
+    limit,
   }) => {
     try {
       const { context, cached } = await manager.prepareBoardContext({
@@ -288,9 +314,49 @@ server.tool(
         sectionSummaryCharLimits: section_summary_char_limits ?? undefined,
         includeLegacyDoc: include_legacy_doc ?? undefined,
       });
+
+      // Paginated path: build payload (with progressive trimming) and return the requested chunk
+      if (offset !== undefined || limit !== undefined) {
+        const fullPayload = buildBoardContextPayload(context, cached);
+        const { content } = paginateBoardContextPayload(
+          fullPayload,
+          offset ?? 0,
+          limit ?? 40000,
+        );
+        return { content };
+      }
+
+      // Standard path: build trimmed payload (compact JSON for consistent size measurement)
       const payload = buildBoardContextPayload(context, cached);
+      const serialized = JSON.stringify(payload);
+      const serializedBytes = Buffer.byteLength(serialized, "utf8");
+
+      if (debug) {
+        const pretty = JSON.stringify(payload, null, 2);
+        process.stderr.write(`[review-context] board payload: ${serializedBytes} bytes (${pretty.length} chars pretty)\n`);
+      }
+
+      // If payload still exceeds transport budget after trimming, return pagination hint
+      if (serializedBytes > TRANSPORT_MAX_BYTES) {
+        const hint = {
+          _pagination_required: true,
+          total_chars: serialized.length,
+          payload_bytes: serializedBytes,
+          suggested_limit: 40000,
+          message: "Payload exceeds transport limit after trimming. " +
+            "Re-call with offset=0 and limit=40000 to retrieve in chunks, " +
+            "then increment offset by limit until has_more is false.",
+          cached,
+          session_id: context.sessionId,
+          workspace_root: context.workspaceRoot,
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(hint) }],
+        };
+      }
+
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+        content: [{ type: "text" as const, text: serialized }],
       };
     } catch (err) {
       return {
@@ -318,11 +384,18 @@ server.tool(
   async ({ session_id }) => {
     try {
       const id = await manager.saveSession(session_id ?? undefined);
+      const status = manager.getStatus();
       return {
         content: [
           {
             type: "text" as const,
-            text: `Session saved: ${id}. Use review_resume_session with this ID to restore.`,
+            text:
+              `Session saved: ${id}\n` +
+              `  Workspace: ${status.workspaceRoot ?? "unknown"}\n` +
+              `  Indexed files: ${status.indexedFiles}\n` +
+              `  Cached results: ${status.cachedResults}\n` +
+              `  Board contexts: ${status.preparedBoardContexts}\n` +
+              `\nTo resume: review_resume_session({ session_id: "${id}" })`,
           },
         ],
       };
@@ -355,9 +428,11 @@ server.tool(
             type: "text" as const,
             text:
               `Session resumed: ${session_id}\n` +
+              `  Workspace: ${info.workspaceRoot}\n` +
               `  Indexed files: ${info.indexedFiles}\n` +
               `  Cached results: ${info.cachedResults}\n` +
-              `  Workspace: ${info.workspaceRoot}`,
+              `  Board contexts: ${info.boardContextCount}\n` +
+              `  Session age: ${formatAge(info.sessionAge)}`,
           },
         ],
       };
@@ -386,8 +461,9 @@ server.tool(
       }
 
       const lines = sessions.map((s) => {
-        const date = new Date(s.createdAt).toISOString();
-        return `  ${s.sessionId} | ${date} | ${s.indexedPaths.length} files | ${s.workspaceRoot}`;
+        const age = formatAge(Date.now() - s.createdAt);
+        const boards = s.boardContextCount ?? 0;
+        return `  ${s.sessionId} | ${age} | ${s.indexedPaths.length} files | ${boards} boards | ${s.workspaceRoot}`;
       });
 
       return {

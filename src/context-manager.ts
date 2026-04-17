@@ -31,6 +31,7 @@ interface SessionMeta {
   createdAt: number;
   indexedPaths: string[];
   workspaceRoot: string;
+  boardContextCount?: number;
 }
 
 interface StructuredSearchChunk {
@@ -132,12 +133,23 @@ function isEnoent(err: unknown): boolean {
 
 export const TRANSPORT_MAX_BYTES = 80_000;
 
+export interface PaginationMeta {
+  total_chars: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
 /**
  * Build the MCP transport payload for review_prepare_board_context.
  * Uses planning-phase section bodies for excerpt fields so summarized content
  * is not bypassed by the raw builderInput values.
- * If the serialized result exceeds TRANSPORT_MAX_BYTES, artifact_markdown is
- * omitted (it is derivable from prepared_context_packages.planning).
+ *
+ * Progressive trimming stages when the serialized result exceeds TRANSPORT_MAX_BYTES:
+ *   1. Drop artifact_markdown (derivable from planning sections)
+ *   2. Replace remaining builder_input text fields with planning-section summaries
+ *   3. Trim structured_search to metadata only (drop chunks array)
+ *   4. Drop debate/synthesis packages (planning has the critical data)
  */
 export function buildBoardContextPayload(
   context: PreparedBoardContext,
@@ -176,13 +188,75 @@ export function buildBoardContextPayload(
     artifact_markdown: context.artifactMarkdown,
   };
 
-  // Final transport-size guard: drop artifact_markdown if payload is over budget
-  // (artifact_markdown is a rendering of prepared_context_packages.planning sections)
-  if (Buffer.byteLength(JSON.stringify(payload), "utf8") > TRANSPORT_MAX_BYTES) {
+  const payloadBytes = () => Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+  // Stage 1: Drop artifact_markdown (rendering of planning sections)
+  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
     delete payload.artifact_markdown;
   }
 
+  // Stage 2: Replace builder_input text fields with their planning-section summaries
+  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
+    const bi = payload.builder_input as Record<string, unknown>;
+    for (const key of ["repository_state", "project_rules", "corpus_reference_excerpts"]) {
+      const section = planSections.find((s) => s.key === key);
+      if (section && typeof bi[key] === "string" && (bi[key] as string).length > section.body.length) {
+        bi[key] = section.body;
+      }
+    }
+  }
+
+  // Stage 3: Trim structured_search to metadata only
+  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
+    payload.structured_search = {
+      query: structuredSearch.query,
+      cached: structuredSearch.cached,
+      chunkCount: structuredSearch.chunkCount,
+    };
+  }
+
+  // Stage 4: Drop debate/synthesis packages (planning has the critical data)
+  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
+    const packages = { ...context.preparedContextPackages };
+    delete packages.debate;
+    delete packages.synthesis;
+    payload.prepared_context_packages = packages;
+  }
+
   return payload;
+}
+
+/**
+ * Paginate a board context payload for chunked retrieval over MCP transport.
+ * Serializes the payload (which may already be trimmed by buildBoardContextPayload)
+ * as compact JSON and returns the requested character range inside a pagination
+ * envelope.  Offset and limit are character-based; the max limit of 40 000 chars
+ * provides a ~2× safety margin against the 80 000-byte transport budget for
+ * predominantly-ASCII JSON payloads.
+ */
+export function paginateBoardContextPayload(
+  payload: Record<string, unknown>,
+  offset: number,
+  limit: number,
+): { content: Array<{ type: "text"; text: string }>; pagination: PaginationMeta } {
+  const serialized = JSON.stringify(payload);
+  const totalChars = serialized.length;
+  const effectiveOffset = Math.min(offset, totalChars);
+  const chunk = serialized.slice(effectiveOffset, effectiveOffset + limit);
+  const hasMore = effectiveOffset + limit < totalChars;
+
+  const pagination: PaginationMeta = {
+    total_chars: totalChars,
+    offset: effectiveOffset,
+    limit,
+    has_more: hasMore,
+  };
+
+  const envelope = { _pagination: pagination, chunk };
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(envelope) }],
+    pagination,
+  };
 }
 
 export class ContextManager {
@@ -1018,6 +1092,7 @@ export class ContextManager {
       createdAt,
       indexedPaths,
       workspaceRoot: this.workspaceRoot ?? "",
+      boardContextCount: this.boardContextCache.size,
     };
 
     // Atomic writes: temp file + rename
@@ -1050,6 +1125,8 @@ export class ContextManager {
   async resumeSession(sessionId: string): Promise<{
     indexedFiles: number;
     cachedResults: number;
+    boardContextCount: number;
+    sessionAge: number;
     workspaceRoot: string;
   }> {
     const statePath = this.sessionPath(sessionId);
@@ -1132,6 +1209,8 @@ export class ContextManager {
     return {
       indexedFiles: meta.indexedPaths.length,
       cachedResults: this.resultCache.size,
+      boardContextCount: this.boardContextCache.size,
+      sessionAge: meta.createdAt > 0 ? Date.now() - meta.createdAt : 0,
       workspaceRoot: this.workspaceRoot ?? "",
     };
   }
