@@ -340,12 +340,11 @@ server.tool(
       if (serializedBytes > TRANSPORT_MAX_BYTES) {
         const hint = {
           _pagination_required: true,
-          total_chars: serialized.length,
           payload_bytes: serializedBytes,
           suggested_limit: 40000,
           message: "Payload exceeds transport limit after trimming. " +
             "Re-call with offset=0 and limit=40000 to retrieve in chunks, " +
-            "then increment offset by limit until has_more is false.",
+            "then increment offset by bytes_in_chunk until has_more is false.",
           cached,
           session_id: context.sessionId,
           workspace_root: context.workspaceRoot,

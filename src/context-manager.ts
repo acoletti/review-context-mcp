@@ -134,10 +134,11 @@ function isEnoent(err: unknown): boolean {
 export const TRANSPORT_MAX_BYTES = 80_000;
 
 export interface PaginationMeta {
-  total_chars: number;
+  total_bytes: number;
   offset: number;
   limit: number;
   has_more: boolean;
+  bytes_in_chunk: number;
 }
 
 /**
@@ -188,15 +189,16 @@ export function buildBoardContextPayload(
     artifact_markdown: context.artifactMarkdown,
   };
 
-  const payloadBytes = () => Buffer.byteLength(JSON.stringify(payload), "utf8");
+  let bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
 
   // Stage 1: Drop artifact_markdown (rendering of planning sections)
-  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
+  if (bytes > TRANSPORT_MAX_BYTES) {
     delete payload.artifact_markdown;
+    bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
   }
 
   // Stage 2: Replace builder_input text fields with their planning-section summaries
-  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
+  if (bytes > TRANSPORT_MAX_BYTES) {
     const bi = payload.builder_input as Record<string, unknown>;
     for (const key of ["repository_state", "project_rules", "corpus_reference_excerpts"]) {
       const section = planSections.find((s) => s.key === key);
@@ -204,19 +206,21 @@ export function buildBoardContextPayload(
         bi[key] = section.body;
       }
     }
+    bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
   }
 
   // Stage 3: Trim structured_search to metadata only
-  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
+  if (bytes > TRANSPORT_MAX_BYTES) {
     payload.structured_search = {
       query: structuredSearch.query,
       cached: structuredSearch.cached,
       chunkCount: structuredSearch.chunkCount,
     };
+    bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
   }
 
   // Stage 4: Drop debate/synthesis packages (planning has the critical data)
-  if (payloadBytes() > TRANSPORT_MAX_BYTES) {
+  if (bytes > TRANSPORT_MAX_BYTES) {
     const packages = { ...context.preparedContextPackages };
     delete packages.debate;
     delete packages.synthesis;
@@ -228,11 +232,11 @@ export function buildBoardContextPayload(
 
 /**
  * Paginate a board context payload for chunked retrieval over MCP transport.
- * Serializes the payload (which may already be trimmed by buildBoardContextPayload)
- * as compact JSON and returns the requested character range inside a pagination
- * envelope.  Offset and limit are character-based; the max limit of 40 000 chars
- * provides a ~2× safety margin against the 80 000-byte transport budget for
- * predominantly-ASCII JSON payloads.
+ * Serializes the payload as compact JSON and returns the requested byte range
+ * inside a pagination envelope.  Offset and limit are byte-based so the
+ * transport budget is honored exactly, even for multi-byte UTF-8 content.
+ * Chunk boundaries are aligned to UTF-8 character boundaries — callers must
+ * use `bytes_in_chunk` (not `limit`) to compute the next offset.
  */
 export function paginateBoardContextPayload(
   payload: Record<string, unknown>,
@@ -240,16 +244,37 @@ export function paginateBoardContextPayload(
   limit: number,
 ): { content: Array<{ type: "text"; text: string }>; pagination: PaginationMeta } {
   const serialized = JSON.stringify(payload);
-  const totalChars = serialized.length;
-  const effectiveOffset = Math.min(offset, totalChars);
-  const chunk = serialized.slice(effectiveOffset, effectiveOffset + limit);
-  const hasMore = effectiveOffset + limit < totalChars;
+  const buf = Buffer.from(serialized, "utf8");
+  const totalBytes = buf.length;
+  const effectiveOffset = Math.min(offset, totalBytes);
+  const rawEnd = Math.min(effectiveOffset + limit, totalBytes);
+
+  // Ensure the chunk ends on a complete UTF-8 character boundary
+  let safeEnd = rawEnd;
+  if (safeEnd < totalBytes && safeEnd > effectiveOffset) {
+    let pos = safeEnd - 1;
+    while (pos > effectiveOffset && (buf[pos] & 0xC0) === 0x80) {
+      pos--;
+    }
+    const lead = buf[pos];
+    let seqLen = 1;
+    if ((lead & 0x80) === 0) seqLen = 1;
+    else if ((lead & 0xE0) === 0xC0) seqLen = 2;
+    else if ((lead & 0xF0) === 0xE0) seqLen = 3;
+    else if ((lead & 0xF8) === 0xF0) seqLen = 4;
+    if (pos + seqLen > rawEnd) safeEnd = pos;
+  }
+
+  const chunk = buf.subarray(effectiveOffset, safeEnd).toString("utf8");
+  const bytesInChunk = safeEnd - effectiveOffset;
+  const hasMore = safeEnd < totalBytes;
 
   const pagination: PaginationMeta = {
-    total_chars: totalChars,
+    total_bytes: totalBytes,
     offset: effectiveOffset,
     limit,
     has_more: hasMore,
+    bytes_in_chunk: bytesInChunk,
   };
 
   const envelope = { _pagination: pagination, chunk };

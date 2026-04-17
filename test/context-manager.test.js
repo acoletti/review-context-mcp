@@ -546,33 +546,25 @@ test("listSessions returns partial results when one meta file is unreadable", as
 
 // ─── Pagination and progressive trimming tests ─────────────────────────────
 
-test("paginateBoardContextPayload returns correct chunk and pagination metadata", () => {
+test("paginateBoardContextPayload returns correct chunk and pagination metadata (byte-based)", () => {
   const payload = { data: "a".repeat(5000), extra: "b".repeat(3000) };
   const serialized = JSON.stringify(payload);
-  const totalChars = serialized.length;
+  const totalBytes = Buffer.byteLength(serialized, "utf8");
 
   // First chunk
   const first = paginateBoardContextPayload(payload, 0, 4000);
   assert.equal(first.content.length, 1);
   assert.equal(first.content[0].type, "text");
-  assert.equal(first.pagination.total_chars, totalChars);
+  assert.equal(first.pagination.total_bytes, totalBytes);
   assert.equal(first.pagination.offset, 0);
   assert.equal(first.pagination.limit, 4000);
   assert.equal(first.pagination.has_more, true);
+  assert.equal(first.pagination.bytes_in_chunk, 4000);
 
   const firstEnvelope = JSON.parse(first.content[0].text);
-  assert.equal(firstEnvelope.chunk.length, 4000);
-  assert.equal(firstEnvelope.chunk, serialized.slice(0, 4000));
+  assert.equal(Buffer.byteLength(firstEnvelope.chunk, "utf8"), 4000);
 
-  // Second chunk
-  const second = paginateBoardContextPayload(payload, 4000, 4000);
-  assert.equal(second.pagination.offset, 4000);
-  assert.equal(second.pagination.has_more, totalChars > 8000);
-
-  const secondEnvelope = JSON.parse(second.content[0].text);
-  assert.equal(secondEnvelope.chunk, serialized.slice(4000, 8000));
-
-  // Reconstruct full payload from chunks
+  // Reconstruct full payload from chunks using bytes_in_chunk
   let reconstructed = "";
   let offset = 0;
   const chunkSize = 4000;
@@ -581,17 +573,17 @@ test("paginateBoardContextPayload returns correct chunk and pagination metadata"
     const env = JSON.parse(page.content[0].text);
     reconstructed += env.chunk;
     if (!env._pagination.has_more) break;
-    offset += chunkSize;
+    offset += env._pagination.bytes_in_chunk;
   }
   assert.equal(reconstructed, serialized, "reconstructed payload must match original serialization");
 });
 
 test("paginateBoardContextPayload clamps offset past end of data", () => {
   const payload = { small: "test" };
-  const serialized = JSON.stringify(payload);
 
   const result = paginateBoardContextPayload(payload, 99999, 4000);
   assert.equal(result.pagination.has_more, false);
+  assert.equal(result.pagination.bytes_in_chunk, 0);
   const envelope = JSON.parse(result.content[0].text);
   assert.equal(envelope.chunk, "");
 });
@@ -797,23 +789,27 @@ test("buildBoardContextPayload does not mutate the cached context object", () =>
     "preparedContextPackages.debate must not be deleted");
 });
 
-test("paginateBoardContextPayload handles multi-byte Unicode content correctly", () => {
+test("paginateBoardContextPayload handles multi-byte Unicode content correctly (byte-based)", () => {
   // Payload with CJK characters: each char is 3 bytes in UTF-8
   const payload = { data: "\u4e16\u754c".repeat(2000), ascii: "hello" };
   const serialized = JSON.stringify(payload);
-  const totalChars = serialized.length;
+  const totalBytes = Buffer.byteLength(serialized, "utf8");
 
-  // Character-based pagination should work correctly
+  // Byte-based pagination: 2000-byte limit holds fewer CJK chars than ASCII chars
   const first = paginateBoardContextPayload(payload, 0, 2000);
-  assert.equal(first.pagination.total_chars, totalChars);
+  assert.equal(first.pagination.total_bytes, totalBytes);
   assert.equal(first.pagination.offset, 0);
   assert.equal(first.pagination.limit, 2000);
 
   const firstEnvelope = JSON.parse(first.content[0].text);
-  assert.equal(firstEnvelope.chunk.length, 2000,
-    "chunk length should equal the limit in characters");
+  const firstChunkBytes = Buffer.byteLength(firstEnvelope.chunk, "utf8");
+  assert.ok(firstChunkBytes <= 2000,
+    `chunk byte length (${firstChunkBytes}) should not exceed limit (2000)`);
+  assert.ok(firstEnvelope.chunk.length < 2000,
+    "chunk char length should be less than limit due to multi-byte chars");
+  assert.equal(first.pagination.bytes_in_chunk, firstChunkBytes);
 
-  // Reconstruct and verify round-trip
+  // Reconstruct using bytes_in_chunk for offset advancement
   let reconstructed = "";
   let offset = 0;
   const chunkSize = 2000;
@@ -822,11 +818,11 @@ test("paginateBoardContextPayload handles multi-byte Unicode content correctly",
     const env = JSON.parse(page.content[0].text);
     reconstructed += env.chunk;
     if (!env._pagination.has_more) break;
-    offset += chunkSize;
+    offset += env._pagination.bytes_in_chunk;
   }
   const parsed = JSON.parse(reconstructed);
   assert.equal(parsed.data, "\u4e16\u754c".repeat(2000),
-    "multi-byte content must survive pagination round-trip");
+    "multi-byte content must survive byte-based pagination round-trip");
 });
 
 // ─── Serialization guard regression + metadata enrichment tests ─────────
