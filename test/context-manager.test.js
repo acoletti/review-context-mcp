@@ -6,6 +6,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { z } from "zod";
 import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "../dist/context-manager.js";
 
 const CACHE_DIR = join(homedir(), ".claude", "review-cache");
@@ -325,7 +326,10 @@ test("prepareBoardContext transport payload stays within 80 KB when excerpts are
   const transportPayload = manager.buildBoardContextPayload(context, cached);
   const serialized = JSON.stringify(transportPayload, null, 2);
 
-  // Must not exceed 80 KB
+  // TODO(P0): This check uses character length on pretty-printed JSON, not
+  // Buffer.byteLength on compact JSON. For ASCII fixtures the values are close
+  // but diverge for multi-byte content or large whitespace overhead. Align with
+  // the byte-based compact-JSON guard used in production (buildBoardContextPayload).
   const TRANSPORT_MAX_BYTES = 80_000;
   assert.ok(
     serialized.length <= TRANSPORT_MAX_BYTES,
@@ -599,6 +603,83 @@ test("paginateBoardContextPayload returns empty chunk at exact byte boundary", (
   assert.equal(result.pagination.bytes_in_chunk, 0);
   const envelope = JSON.parse(result.content[0].text);
   assert.equal(envelope.chunk, "");
+});
+
+test("Zod .int() rejects fractional byte offsets", () => {
+  const schema = z.number().int().min(0);
+  assert.throws(() => schema.parse(1.5), /int/i);
+  assert.throws(() => schema.parse(999.9), /int/i);
+  assert.equal(schema.parse(0), 0);
+  assert.equal(schema.parse(40000), 40000);
+});
+
+test("buildBoardContextPayload Stage 4 drops debate/synthesis and recomputes bytes", () => {
+  const context = {
+    workspaceRoot: "/tmp/test",
+    userRequest: "test",
+    retrievalQuery: "test",
+    sessionId: "test-session",
+    generatedAt: Date.now(),
+    indexing: { performed: true, fileCount: 1, newlyUploaded: [], alreadyUploaded: [], errors: [] },
+    structuredSearch: {
+      query: "test",
+      cached: false,
+      chunkCount: 0,
+      chunks: [],
+      rawResult: "",
+    },
+    builderInput: {
+      user_request: "test",
+      focused_code_excerpts: "x".repeat(15000),
+      augment_retrieval_excerpts: "y".repeat(10000),
+      corpus_reference_excerpts: "",
+      applicable_coding_standards: "",
+      repository_state: "",
+      project_rules: "",
+      external_documentation: "",
+      external_documentation_summary: "",
+      cross_repository_patterns: "",
+      cross_repository_patterns_summary: "",
+      referenced_file_paths: [],
+    },
+    preparedContextPackages: {
+      planning: {
+        budget_chars: 20800,
+        sections: [
+          { key: "user_request", label: "User Request", body: "test", priority: 1, required: true, mode: "full" },
+          { key: "focused_code_excerpts", label: "Excerpts", body: "x".repeat(15000), priority: 3, required: false, mode: "full" },
+          { key: "augment_retrieval_excerpts", label: "Augment", body: "y".repeat(10000), priority: 3, required: false, mode: "full" },
+        ],
+      },
+      debate: {
+        budget_chars: 5600,
+        sections: [
+          { key: "debate_context", label: "Debate", body: "d".repeat(25000), priority: 1, required: true, mode: "full" },
+        ],
+      },
+      synthesis: {
+        budget_chars: 6400,
+        sections: [
+          { key: "synthesis_context", label: "Synthesis", body: "s".repeat(25000), priority: 1, required: true, mode: "full" },
+        ],
+      },
+    },
+    artifactMarkdown: "a".repeat(5000),
+  };
+
+  const payload = buildBoardContextPayload(context, false);
+  const compactBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+  // Stage 4 should have fired — debate/synthesis absent, planning preserved
+  assert.equal(payload.prepared_context_packages.debate, undefined);
+  assert.equal(payload.prepared_context_packages.synthesis, undefined);
+  assert.ok(payload.prepared_context_packages.planning !== undefined);
+
+  // Compact bytes should be within transport budget after Stage 4 trimming
+  assert.ok(
+    compactBytes <= TRANSPORT_MAX_BYTES,
+    `Stage 4 trimmed payload (${compactBytes} bytes) should fit within ${TRANSPORT_MAX_BYTES}`,
+  );
 });
 
 test("buildBoardContextPayload replaces builder_input excerpt fields with planning section bodies", async (t) => {
