@@ -52,7 +52,7 @@ test("review_normalize_plans: returns isError on LLM failure", async () => {
   assert.match(result.content[0].text, /rate limited/i);
 });
 
-test("review_normalize_plans: handles non-JSON LLM response gracefully", async () => {
+test("review_normalize_plans: returns isError on non-JSON LLM response", async () => {
   const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
   const client = mockLlmClient("Here is a plain text response without JSON");
   const handler = createNormalizePlansHandler(client);
@@ -61,8 +61,8 @@ test("review_normalize_plans: handles non-JSON LLM response gracefully", async (
     plans: [{ agent_name: "Claude", plan_text: "plan" }],
   });
 
-  assert.equal(result.isError, undefined);
-  assert.match(result.content[0].text, /plain text response/);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /non-JSON output/i);
 });
 
 // ─── review_derive_queries ──────────────────────────────────────────────
@@ -192,4 +192,80 @@ test("review_build_persona_digests: uses custom sections_to_keep", async () => {
   assert.match(capturedPrompt, /Tone/);
   // Should NOT contain the default "Engineering Lens" since custom sections were provided
   assert.doesNotMatch(capturedPrompt, /Engineering Lens/);
+});
+
+// ─── tryParseJson fence-stripping via handler integration ──────────────
+
+test("handler parses clean fenced JSON correctly", async () => {
+  const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
+  const json = [{ agent_name: "Claude", delta: "test" }];
+  const fenced = "```json\n" + JSON.stringify(json) + "\n```";
+  const client = mockLlmClient(fenced);
+  const handler = createNormalizePlansHandler(client);
+
+  const result = await handler({
+    plans: [{ agent_name: "Claude", plan_text: "plan" }],
+  });
+
+  assert.equal(result.isError, undefined);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed[0].agent_name, "Claude");
+});
+
+test("handler parses fenced JSON with conversational framing", async () => {
+  const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
+  const json = [{ agent_name: "Claude", delta: "test" }];
+  const framed = "Here is the JSON:\n```json\n" + JSON.stringify(json) + "\n```\nHope that helps!";
+  const client = mockLlmClient(framed);
+  const handler = createNormalizePlansHandler(client);
+
+  const result = await handler({
+    plans: [{ agent_name: "Claude", plan_text: "plan" }],
+  });
+
+  assert.equal(result.isError, undefined);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed[0].agent_name, "Claude");
+});
+
+test("handler parses bare JSON without fences", async () => {
+  const { createDeriveQueriesHandler } = await import("../dist/llm-tools.js");
+  const json = [{ query: "test query", type: "semantic", rationale: "r" }];
+  const client = mockLlmClient(JSON.stringify(json));
+  const handler = createDeriveQueriesHandler(client);
+
+  const result = await handler({ user_request: "review this" });
+
+  assert.equal(result.isError, undefined);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed[0].query, "test query");
+});
+
+test("handler returns isError when LLM returns plain prose", async () => {
+  const { createBuildPersonaDigestsHandler } = await import("../dist/llm-tools.js");
+  const client = mockLlmClient("I cannot generate the digests right now, sorry.");
+  const handler = createBuildPersonaDigestsHandler(client);
+
+  const result = await handler({
+    personas: [{ agent_name: "Claude", persona_text: "persona" }],
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /non-JSON output/i);
+});
+
+test("handler parses fenced JSON with language tag but no 'json' label", async () => {
+  const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
+  const json = [{ agent_name: "Claude", delta: "test" }];
+  const fenced = "```\n" + JSON.stringify(json) + "\n```";
+  const client = mockLlmClient(fenced);
+  const handler = createNormalizePlansHandler(client);
+
+  const result = await handler({
+    plans: [{ agent_name: "Claude", plan_text: "plan" }],
+  });
+
+  assert.equal(result.isError, undefined);
+  const parsed = JSON.parse(result.content[0].text);
+  assert.equal(parsed[0].agent_name, "Claude");
 });

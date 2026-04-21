@@ -71,13 +71,15 @@ export class LlmClient {
   async _generateText(args: {
     model: AugmentLanguageModel;
     messages: Array<{ role: "system" | "user"; content: string }>;
-    maxTokens?: number;
+    maxOutputTokens?: number;
     temperature?: number;
     abortSignal?: AbortSignal;
   }): Promise<{ text: string }> {
-    // AugmentLanguageModel and ai SDK use different @ai-sdk/provider versions,
-    // causing LanguageModelV2 type mismatch. Runtime compatible.
-    return generateText(args as any);
+    // @ts-expect-error — Dual-package type mismatch: @ai-sdk/provider@3.0.8
+    // (transitive from auggie-sdk) vs ai@5 internal @ai-sdk/provider@2.0.1.
+    // Both define LanguageModelV2 identically but TypeScript treats them as
+    // incompatible nominal types. Safe at runtime (ai@5 uses duck-typing).
+    return generateText(args);
   }
 
   async generate(
@@ -107,7 +109,7 @@ export class LlmClient {
           { role: "system", content: systemPrompt },
           { role: "user", content: userContent },
         ],
-        maxTokens: options?.maxTokens,
+        maxOutputTokens: options?.maxTokens,
         temperature: options?.temperature,
         abortSignal: controller.signal,
       });

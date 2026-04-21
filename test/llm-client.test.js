@@ -30,7 +30,7 @@ test("LlmClient.generate() calls generateText with correct model and prompts", a
 
   assert.equal(result, "mock response");
   assert.ok(capturedArgs);
-  assert.equal(capturedArgs.maxTokens, 500);
+  assert.equal(capturedArgs.maxOutputTokens, 500);
   // System prompt and user content should be in the messages
   const messages = capturedArgs.messages;
   assert.equal(messages.length, 2);

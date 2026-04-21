@@ -647,7 +647,7 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe("Model override (default: sonnet4.5)"),
+      .describe("Model override (default: claude-sonnet-4-5)"),
   },
   createNormalizePlansHandler(llm),
 );
@@ -677,7 +677,7 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe("Model override (default: sonnet4.5)"),
+      .describe("Model override (default: claude-sonnet-4-5)"),
   },
   createDeriveQueriesHandler(llm),
 );
@@ -710,7 +710,7 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe("Model override (default: sonnet4.5)"),
+      .describe("Model override (default: claude-sonnet-4-5)"),
   },
   createSummarizeContextHandler(llm),
 );
@@ -742,7 +742,7 @@ server.tool(
     model: z
       .string()
       .optional()
-      .describe("Model override (default: sonnet4.5)"),
+      .describe("Model override (default: claude-sonnet-4-5)"),
   },
   createBuildPersonaDigestsHandler(llm),
 );

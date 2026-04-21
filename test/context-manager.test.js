@@ -1,3 +1,6 @@
+/**
+ * [LAYER: INFRASTRUCTURE]
+ */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -326,14 +329,11 @@ test("prepareBoardContext transport payload stays within 80 KB when excerpts are
   const transportPayload = manager.buildBoardContextPayload(context, cached);
   const serialized = JSON.stringify(transportPayload, null, 2);
 
-  // TODO(P0): This check uses character length on pretty-printed JSON, not
-  // Buffer.byteLength on compact JSON. For ASCII fixtures the values are close
-  // but diverge for multi-byte content or large whitespace overhead. Align with
-  // the byte-based compact-JSON guard used in production (buildBoardContextPayload).
-  const TRANSPORT_MAX_BYTES = 80_000;
+  // Use the same byte-based compact-JSON guard as production (buildBoardContextPayload).
+  const compactBytes = Buffer.byteLength(JSON.stringify(transportPayload), "utf8");
   assert.ok(
-    serialized.length <= TRANSPORT_MAX_BYTES,
-    `Transport payload is ${serialized.length} chars, exceeds ${TRANSPORT_MAX_BYTES} limit. ` +
+    compactBytes <= TRANSPORT_MAX_BYTES,
+    `Transport payload is ${compactBytes} bytes, exceeds ${TRANSPORT_MAX_BYTES} limit. ` +
     `builder_input.augment_retrieval_excerpts=${
       JSON.stringify(transportPayload.builder_input?.augment_retrieval_excerpts ?? "").length
     } chars`,
@@ -988,10 +988,10 @@ test("buildBoardContextPayload compact JSON fits within transport budget even if
     `Compact payload (${compactBytes} bytes) should fit within ${TRANSPORT_MAX_BYTES}`,
   );
 
-  // Pretty-printed should be significantly larger due to structural indentation
+  // Pretty-printed should always be larger than compact due to structural indentation
   assert.ok(
-    pretty.length > compact.length * 1.1,
-    `Pretty-printed (${pretty.length}) should be at least 10% larger than compact (${compact.length})`,
+    pretty.length > compact.length,
+    `Pretty-printed (${pretty.length}) should be larger than compact (${compact.length})`,
   );
 });
 

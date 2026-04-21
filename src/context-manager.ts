@@ -1,3 +1,6 @@
+/**
+ * [LAYER: INFRASTRUCTURE]
+ */
 import { DirectContext, type File, type IndexingResult } from "@augmentcode/auggie-sdk";
 import { execFile } from "child_process";
 import { readFile, writeFile, rename, unlink, stat, readdir } from "fs/promises";
@@ -131,7 +134,20 @@ function isEnoent(err: unknown): boolean {
   return err instanceof Error && "code" in err && (err as { code: string }).code === "ENOENT";
 }
 
-export const TRANSPORT_MAX_BYTES = 80_000;
+/**
+ * Maximum bytes for the MCP tool-result text field.
+ *
+ * Claude Code imposes a character limit on MCP tool results that includes the
+ * JSON envelope wrapping (`[{"type":"text","text":"..."}]`).  The envelope adds
+ * ~4-5 KB of overhead from JSON string-escaping (every `"` in the inner JSON
+ * becomes `\"`).  We budget 60 KB for the inner payload so the total result
+ * stays well under Claude's ~80 K character ceiling even for multi-byte or
+ * quote-heavy content.
+ *
+ * When the payload exceeds this limit after progressive trimming, the server
+ * returns a pagination hint and the orchestrator re-calls with offset/limit.
+ */
+export const TRANSPORT_MAX_BYTES = 60_000;
 
 export interface PaginationMeta {
   total_bytes: number;
@@ -158,7 +174,10 @@ export function buildBoardContextPayload(
 ): Record<string, unknown> {
   const { rawResult: _raw, ...structuredSearch } = context.structuredSearch;
 
-  // Resolve excerpt fields from planning sections (may be summarized)
+  // Always deduplicate builder_input against planning sections.
+  // Planning sections may be summarized to fit prompt budgets; raw builder_input
+  // fields can be 5-15x larger.  Using the planning bodies consistently keeps
+  // the payload compact and prevents envelope-size surprises.
   const planSections = context.preparedContextPackages.planning?.sections ?? [];
   const getSectionBody = (key: string, fallback: string): string => {
     const section = planSections.find((s) => s.key === key);
@@ -174,6 +193,18 @@ export function buildBoardContextPayload(
     augment_retrieval_excerpts: getSectionBody(
       "augment_retrieval_excerpts",
       context.builderInput.augment_retrieval_excerpts,
+    ),
+    repository_state: getSectionBody(
+      "repository_state",
+      context.builderInput.repository_state,
+    ),
+    project_rules: getSectionBody(
+      "project_rules",
+      context.builderInput.project_rules,
+    ),
+    corpus_reference_excerpts: getSectionBody(
+      "corpus_reference_excerpts",
+      context.builderInput.corpus_reference_excerpts,
     ),
   };
 

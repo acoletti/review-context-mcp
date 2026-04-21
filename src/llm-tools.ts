@@ -1,5 +1,7 @@
 import type { LlmClient } from "./llm-client.js";
 
+// TODO: Consolidate with toErrorMessage() in context-manager.ts — identical
+// ErrorResult shape, maintenance risk if error formatting changes in one but not the other.
 export function toErrorResult(err: unknown): {
   content: Array<{ type: "text"; text: string }>;
   isError: true;
@@ -11,20 +13,27 @@ export function toErrorResult(err: unknown): {
   };
 }
 
-function tryParseJson(text: string): string {
+interface ParseResult {
+  ok: boolean;
+  text: string;
+}
+
+function tryParseJson(text: string): ParseResult {
   const trimmed = text.trim();
 
-  // Strip markdown code fences if present
-  const fenceMatch = trimmed.match(/^```(?:json)?\s*\n?([\s\S]*?)\n?```$/);
+  // Non-anchored: handles LLM responses with conversational framing around fences
+  const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   const jsonCandidate = fenceMatch ? fenceMatch[1].trim() : trimmed;
 
   try {
     const parsed = JSON.parse(jsonCandidate);
-    return JSON.stringify(parsed, null, 2);
+    return { ok: true, text: JSON.stringify(parsed, null, 2) };
   } catch {
-    return `[WARNING: LLM returned non-JSON output]\n${trimmed}`;
+    return { ok: false, text: trimmed };
   }
 }
+
+const MAX_OUTPUT_TOKENS = 8192;
 
 export function createNormalizePlansHandler(llm: LlmClient) {
   return async (args: {
@@ -54,8 +63,12 @@ export function createNormalizePlansHandler(llm: LlmClient) {
         timeoutMs: 60_000,
       });
 
+      const parsed = tryParseJson(result);
+      if (!parsed.ok) {
+        return toErrorResult(`LLM returned non-JSON output: ${parsed.text.slice(0, 200)}`);
+      }
       return {
-        content: [{ type: "text" as const, text: tryParseJson(result) }],
+        content: [{ type: "text" as const, text: parsed.text }],
       };
     } catch (err) {
       return toErrorResult(err);
@@ -93,8 +106,12 @@ export function createDeriveQueriesHandler(llm: LlmClient) {
         maxTokens: 1000,
       });
 
+      const parsed = tryParseJson(result);
+      if (!parsed.ok) {
+        return toErrorResult(`LLM returned non-JSON output: ${parsed.text.slice(0, 200)}`);
+      }
       return {
-        content: [{ type: "text" as const, text: tryParseJson(result) }],
+        content: [{ type: "text" as const, text: parsed.text }],
       };
     } catch (err) {
       return toErrorResult(err);
@@ -126,7 +143,8 @@ export function createSummarizeContextHandler(llm: LlmClient) {
 
       const result = await llm.generate(systemPrompt, args.text, {
         model: args.model,
-        maxTokens: Math.ceil(args.target_chars / 3),
+        maxTokens: Math.min(Math.ceil(args.target_chars / 3), MAX_OUTPUT_TOKENS),
+        timeoutMs: 45_000,
       });
 
       return {
@@ -169,10 +187,15 @@ export function createBuildPersonaDigestsHandler(llm: LlmClient) {
       const result = await llm.generate(systemPrompt, userContent, {
         model: args.model,
         maxTokens: 2000,
+        timeoutMs: 45_000,
       });
 
+      const parsed = tryParseJson(result);
+      if (!parsed.ok) {
+        return toErrorResult(`LLM returned non-JSON output: ${parsed.text.slice(0, 200)}`);
+      }
       return {
-        content: [{ type: "text" as const, text: tryParseJson(result) }],
+        content: [{ type: "text" as const, text: parsed.text }],
       };
     } catch (err) {
       return toErrorResult(err);
