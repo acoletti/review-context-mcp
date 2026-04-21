@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 
 test("LlmClient is importable and constructible", async () => {
   const { LlmClient } = await import("../dist/llm-client.js");
-  const client = new LlmClient("sonnet4.5", false);
+  const client = new LlmClient("claude-sonnet-4-5", false);
   assert.ok(client);
 });
 
 test("LlmClient.generate() calls generateText with correct model and prompts", async (t) => {
   const { LlmClient } = await import("../dist/llm-client.js");
-  const client = new LlmClient("sonnet4.5", false);
+  const client = new LlmClient("claude-sonnet-4-5", false);
 
   // Mock the internal _generateText to capture what would be sent
   let capturedArgs = null;
@@ -42,7 +42,7 @@ test("LlmClient.generate() calls generateText with correct model and prompts", a
 
 test("LlmClient.generate() uses per-call model override", async (t) => {
   const { LlmClient } = await import("../dist/llm-client.js");
-  const client = new LlmClient("sonnet4.5", false);
+  const client = new LlmClient("claude-sonnet-4-5", false);
 
   let capturedModel = null;
   client._generateText = async (args) => {
@@ -59,7 +59,7 @@ test("LlmClient.generate() uses per-call model override", async (t) => {
 
 test("LlmClient.generate() throws on missing credentials when not initialized", async () => {
   const { LlmClient } = await import("../dist/llm-client.js");
-  const client = new LlmClient("sonnet4.5", false);
+  const client = new LlmClient("claude-sonnet-4-5", false);
 
   // Force credential resolution to fail
   client._resolveCredentials = async () => {

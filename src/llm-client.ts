@@ -27,7 +27,7 @@ export class LlmClient {
 
   constructor(defaultModel?: string, debug?: boolean) {
     this.defaultModel =
-      process.env.REVIEW_LLM_DEFAULT_MODEL ?? defaultModel ?? "sonnet4.5";
+      process.env.REVIEW_LLM_DEFAULT_MODEL ?? defaultModel ?? "claude-sonnet-4-5";
     this.debug = debug ?? process.env.REVIEW_LLM_DEBUG === "true";
   }
 
