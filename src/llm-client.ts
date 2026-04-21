@@ -75,9 +75,8 @@ export class LlmClient {
     temperature?: number;
     abortSignal?: AbortSignal;
   }): Promise<{ text: string }> {
-    // AugmentLanguageModel implements LanguageModelV2; the ai SDK's generateText
-    // accepts both V1 and V2 at runtime but its TS typings only declare V1.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // AugmentLanguageModel and ai SDK use different @ai-sdk/provider versions,
+    // causing LanguageModelV2 type mismatch. Runtime compatible.
     return generateText(args as any);
   }
 
