@@ -1,12 +1,24 @@
 #!/usr/bin/env node
+/**
+ * [LAYER: INFRASTRUCTURE]
+ */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { ContextManager, toErrorMessage, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "./context-manager.js";
+import { LlmClient } from "./llm-client.js";
+import {
+  createNormalizePlansHandler,
+  createDeriveQueriesHandler,
+  createSummarizeContextHandler,
+  createBuildPersonaDigestsHandler,
+} from "./llm-tools.js";
 
 const debug = process.env.REVIEW_CONTEXT_DEBUG === "true";
 const manager = new ContextManager(debug);
+const llmDebug = process.env.REVIEW_LLM_DEBUG === "true" || debug;
+const llm = new LlmClient(undefined, llmDebug);
 
 function formatAge(ms: number): string {
   if (ms <= 0) return "unknown";
@@ -121,7 +133,7 @@ server.tool(
       .min(1000)
       .max(80000)
       .optional()
-      .describe("Maximum character length of results (default: 20000, max: 80000). " +
+      .describe("Maximum character length of Augment retrieval results (default: 20000, max: 80000). " +
         "Use lower values for focused queries, higher for broad context gathering."),
   },
   async ({ query, max_output_length }) => {
@@ -155,7 +167,7 @@ server.tool(
       .min(1000)
       .max(80000)
       .optional()
-      .describe("Maximum character length of results to request before chunk parsing."),
+      .describe("Maximum character length of Augment retrieval results to request before chunk parsing."),
     include_raw: z
       .boolean()
       .optional()
@@ -243,7 +255,7 @@ server.tool(
       .min(1000)
       .max(80000)
       .optional()
-      .describe("Maximum character length for the retrieval pass."),
+      .describe("Maximum character length for the Augment retrieval pass (characters, not bytes)."),
     excerpt_char_limit: z
       .number()
       .min(1000)
@@ -274,17 +286,19 @@ server.tool(
       .describe("Include CLAUDE.md in project_rules when present."),
     offset: z
       .number()
+      .int()
       .min(0)
       .optional()
-      .describe("Character offset for paginated retrieval. When provided with limit, " +
+      .describe("Byte offset for paginated retrieval. When provided with limit, " +
         "returns a chunk of the serialized payload instead of the full result. " +
-        "Use this to retrieve large payloads that exceed the transport token limit."),
+        "Use this to retrieve large payloads that exceed the transport byte limit."),
     limit: z
       .number()
+      .int()
       .min(1000)
       .max(40000)
       .optional()
-      .describe("Maximum characters to return per chunk (default: 40000, max: 40000). " +
+      .describe("Maximum bytes to return per chunk (default: 40000, max: 40000). " +
         "Use with offset for paginated retrieval of large payloads."),
   },
   async ({
@@ -332,20 +346,20 @@ server.tool(
       const serializedBytes = Buffer.byteLength(serialized, "utf8");
 
       if (debug) {
-        const pretty = JSON.stringify(payload, null, 2);
-        process.stderr.write(`[review-context] board payload: ${serializedBytes} bytes (${pretty.length} chars pretty)\n`);
+        process.stderr.write(`[review-context] board payload: ${serializedBytes} bytes (${serialized.length} chars)\n`);
       }
 
-      // If payload still exceeds transport budget after trimming, return pagination hint
+      // If payload still exceeds transport budget after trimming, return pagination hint.
+      // TRANSPORT_MAX_BYTES (60 KB) accounts for ~4-5 KB of JSON envelope overhead that
+      // Claude Code adds when wrapping MCP tool results in [{"type":"text","text":"..."}].
       if (serializedBytes > TRANSPORT_MAX_BYTES) {
         const hint = {
           _pagination_required: true,
-          total_chars: serialized.length,
           payload_bytes: serializedBytes,
-          suggested_limit: 40000,
+          suggested_limit: 30000,
           message: "Payload exceeds transport limit after trimming. " +
-            "Re-call with offset=0 and limit=40000 to retrieve in chunks, " +
-            "then increment offset by limit until has_more is false.",
+            "Re-call with offset=0 and limit=30000 to retrieve in chunks, " +
+            "then increment offset by bytes_in_chunk until has_more is false.",
           cached,
           session_id: context.sessionId,
           workspace_root: context.workspaceRoot,
@@ -605,6 +619,132 @@ server.tool(
       };
     }
   },
+);
+
+// ─── Tool: review_normalize_plans ───────────────────────────────────────
+// LLM-powered: extract compact deltas from Phase 2 plans for debate.
+
+server.tool(
+  "review_normalize_plans",
+  "Extract compact normalized deltas from implementation plans for the debate phase. " +
+    "Uses Augment LLM to preserve Problem, Solution, Key files/symbols, Steps, Risks, Priority. " +
+    "Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
+  {
+    plans: z
+      .array(
+        z.object({
+          agent_name: z.string().describe("Name of the agent that produced this plan"),
+          plan_text: z.string().describe("Full plan text from Phase 2"),
+        }),
+      )
+      .describe("Array of implementation plans to normalize"),
+    target_tokens_per_plan: z
+      .number()
+      .min(50)
+      .max(1000)
+      .optional()
+      .describe("Target token count per compact delta (default: 200)"),
+    model: z
+      .string()
+      .optional()
+      .describe("Model override (default: claude-sonnet-4-5)"),
+  },
+  createNormalizePlansHandler(llm),
+);
+
+// ─── Tool: review_derive_queries ────────────────────────────────────────
+// LLM-powered: generate focused retrieval queries from a user request.
+
+server.tool(
+  "review_derive_queries",
+  "Generate focused retrieval queries from a code review request. " +
+    "Returns a mix of semantic and citation-style queries for codebase search. " +
+    "Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
+  {
+    user_request: z
+      .string()
+      .describe("The verbatim user code review request"),
+    file_paths: z
+      .array(z.string())
+      .optional()
+      .describe("Known relevant file paths for additional context"),
+    query_count: z
+      .number()
+      .min(1)
+      .max(10)
+      .optional()
+      .describe("Number of queries to generate (default: 4)"),
+    model: z
+      .string()
+      .optional()
+      .describe("Model override (default: claude-sonnet-4-5)"),
+  },
+  createDeriveQueriesHandler(llm),
+);
+
+// ─── Tool: review_summarize_context ─────────────────────────────────────
+// LLM-powered: summarize text to fit a character budget.
+
+server.tool(
+  "review_summarize_context",
+  "Summarize text to fit a target character budget while preserving technical specificity. " +
+    "Keeps file paths, function names, API endpoints, and version numbers intact. " +
+    "Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
+  {
+    text: z
+      .string()
+      .describe("The content to summarize"),
+    target_chars: z
+      .number()
+      .min(50)
+      .max(20000)
+      .describe("Character budget for the output"),
+    context_label: z
+      .string()
+      .optional()
+      .describe('What this text represents, e.g. "external documentation" (default: "content")'),
+    preserve_keywords: z
+      .array(z.string())
+      .optional()
+      .describe("Terms that must appear in the summary"),
+    model: z
+      .string()
+      .optional()
+      .describe("Model override (default: claude-sonnet-4-5)"),
+  },
+  createSummarizeContextHandler(llm),
+);
+
+// ─── Tool: review_build_persona_digests ─────────────────────────────────
+// LLM-powered: extract compact digests from persona definitions.
+
+server.tool(
+  "review_build_persona_digests",
+  "Extract compact persona digests from full persona definitions for the debate phase. " +
+    "Preserves voice and perspective while keeping only specified sections. " +
+    "Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
+  {
+    personas: z
+      .array(
+        z.object({
+          agent_name: z.string().describe("Name of the agent persona"),
+          persona_text: z.string().describe("Full persona definition text"),
+        }),
+      )
+      .describe("Array of persona definitions to digest"),
+    sections_to_keep: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Sections to extract (default: ["Review Focus", "Engineering Lens", ' +
+          '"What You Praise", "What You Critique", "Tone"])',
+      ),
+    model: z
+      .string()
+      .optional()
+      .describe("Model override (default: claude-sonnet-4-5)"),
+  },
+  createBuildPersonaDigestsHandler(llm),
 );
 
 // ─── Start the server ────────────────────────────────────────────────────

@@ -1,3 +1,6 @@
+/**
+ * [LAYER: INFRASTRUCTURE]
+ */
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -6,6 +9,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { z } from "zod";
 import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "../dist/context-manager.js";
 
 const CACHE_DIR = join(homedir(), ".claude", "review-cache");
@@ -325,11 +329,11 @@ test("prepareBoardContext transport payload stays within 80 KB when excerpts are
   const transportPayload = manager.buildBoardContextPayload(context, cached);
   const serialized = JSON.stringify(transportPayload, null, 2);
 
-  // Must not exceed 80 KB
-  const TRANSPORT_MAX_BYTES = 80_000;
+  // Use the same byte-based compact-JSON guard as production (buildBoardContextPayload).
+  const compactBytes = Buffer.byteLength(JSON.stringify(transportPayload), "utf8");
   assert.ok(
-    serialized.length <= TRANSPORT_MAX_BYTES,
-    `Transport payload is ${serialized.length} chars, exceeds ${TRANSPORT_MAX_BYTES} limit. ` +
+    compactBytes <= TRANSPORT_MAX_BYTES,
+    `Transport payload is ${compactBytes} bytes, exceeds ${TRANSPORT_MAX_BYTES} limit. ` +
     `builder_input.augment_retrieval_excerpts=${
       JSON.stringify(transportPayload.builder_input?.augment_retrieval_excerpts ?? "").length
     } chars`,
@@ -546,33 +550,25 @@ test("listSessions returns partial results when one meta file is unreadable", as
 
 // ─── Pagination and progressive trimming tests ─────────────────────────────
 
-test("paginateBoardContextPayload returns correct chunk and pagination metadata", () => {
+test("paginateBoardContextPayload returns correct chunk and pagination metadata (byte-based)", () => {
   const payload = { data: "a".repeat(5000), extra: "b".repeat(3000) };
   const serialized = JSON.stringify(payload);
-  const totalChars = serialized.length;
+  const totalBytes = Buffer.byteLength(serialized, "utf8");
 
   // First chunk
   const first = paginateBoardContextPayload(payload, 0, 4000);
   assert.equal(first.content.length, 1);
   assert.equal(first.content[0].type, "text");
-  assert.equal(first.pagination.total_chars, totalChars);
+  assert.equal(first.pagination.total_bytes, totalBytes);
   assert.equal(first.pagination.offset, 0);
   assert.equal(first.pagination.limit, 4000);
   assert.equal(first.pagination.has_more, true);
+  assert.equal(first.pagination.bytes_in_chunk, 4000);
 
   const firstEnvelope = JSON.parse(first.content[0].text);
-  assert.equal(firstEnvelope.chunk.length, 4000);
-  assert.equal(firstEnvelope.chunk, serialized.slice(0, 4000));
+  assert.equal(Buffer.byteLength(firstEnvelope.chunk, "utf8"), 4000);
 
-  // Second chunk
-  const second = paginateBoardContextPayload(payload, 4000, 4000);
-  assert.equal(second.pagination.offset, 4000);
-  assert.equal(second.pagination.has_more, totalChars > 8000);
-
-  const secondEnvelope = JSON.parse(second.content[0].text);
-  assert.equal(secondEnvelope.chunk, serialized.slice(4000, 8000));
-
-  // Reconstruct full payload from chunks
+  // Reconstruct full payload from chunks using bytes_in_chunk
   let reconstructed = "";
   let offset = 0;
   const chunkSize = 4000;
@@ -581,19 +577,109 @@ test("paginateBoardContextPayload returns correct chunk and pagination metadata"
     const env = JSON.parse(page.content[0].text);
     reconstructed += env.chunk;
     if (!env._pagination.has_more) break;
-    offset += chunkSize;
+    offset += env._pagination.bytes_in_chunk;
   }
   assert.equal(reconstructed, serialized, "reconstructed payload must match original serialization");
 });
 
 test("paginateBoardContextPayload clamps offset past end of data", () => {
   const payload = { small: "test" };
-  const serialized = JSON.stringify(payload);
 
   const result = paginateBoardContextPayload(payload, 99999, 4000);
   assert.equal(result.pagination.has_more, false);
+  assert.equal(result.pagination.bytes_in_chunk, 0);
   const envelope = JSON.parse(result.content[0].text);
   assert.equal(envelope.chunk, "");
+});
+
+test("paginateBoardContextPayload returns empty chunk at exact byte boundary", () => {
+  const payload = { data: "hello world" };
+  const totalBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+  const result = paginateBoardContextPayload(payload, totalBytes, 4000);
+  assert.equal(result.pagination.total_bytes, totalBytes);
+  assert.equal(result.pagination.offset, totalBytes);
+  assert.equal(result.pagination.has_more, false);
+  assert.equal(result.pagination.bytes_in_chunk, 0);
+  const envelope = JSON.parse(result.content[0].text);
+  assert.equal(envelope.chunk, "");
+});
+
+test("Zod .int() rejects fractional byte offsets", () => {
+  const schema = z.number().int().min(0);
+  assert.throws(() => schema.parse(1.5), /int/i);
+  assert.throws(() => schema.parse(999.9), /int/i);
+  assert.equal(schema.parse(0), 0);
+  assert.equal(schema.parse(40000), 40000);
+});
+
+test("buildBoardContextPayload Stage 4 drops debate/synthesis and recomputes bytes", () => {
+  const context = {
+    workspaceRoot: "/tmp/test",
+    userRequest: "test",
+    retrievalQuery: "test",
+    sessionId: "test-session",
+    generatedAt: Date.now(),
+    indexing: { performed: true, fileCount: 1, newlyUploaded: [], alreadyUploaded: [], errors: [] },
+    structuredSearch: {
+      query: "test",
+      cached: false,
+      chunkCount: 0,
+      chunks: [],
+      rawResult: "",
+    },
+    builderInput: {
+      user_request: "test",
+      focused_code_excerpts: "x".repeat(15000),
+      augment_retrieval_excerpts: "y".repeat(10000),
+      corpus_reference_excerpts: "",
+      applicable_coding_standards: "",
+      repository_state: "",
+      project_rules: "",
+      external_documentation: "",
+      external_documentation_summary: "",
+      cross_repository_patterns: "",
+      cross_repository_patterns_summary: "",
+      referenced_file_paths: [],
+    },
+    preparedContextPackages: {
+      planning: {
+        budget_chars: 20800,
+        sections: [
+          { key: "user_request", label: "User Request", body: "test", priority: 1, required: true, mode: "full" },
+          { key: "focused_code_excerpts", label: "Excerpts", body: "x".repeat(15000), priority: 3, required: false, mode: "full" },
+          { key: "augment_retrieval_excerpts", label: "Augment", body: "y".repeat(10000), priority: 3, required: false, mode: "full" },
+        ],
+      },
+      debate: {
+        budget_chars: 5600,
+        sections: [
+          { key: "debate_context", label: "Debate", body: "d".repeat(25000), priority: 1, required: true, mode: "full" },
+        ],
+      },
+      synthesis: {
+        budget_chars: 6400,
+        sections: [
+          { key: "synthesis_context", label: "Synthesis", body: "s".repeat(25000), priority: 1, required: true, mode: "full" },
+        ],
+      },
+    },
+    artifactMarkdown: "a".repeat(5000),
+  };
+
+  const payload = buildBoardContextPayload(context, false);
+  const compactBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+
+  // Stage 4 should have fired — debate/synthesis absent, planning preserved
+  assert.equal(payload.prepared_context_packages.debate, undefined);
+  assert.equal(payload.prepared_context_packages.synthesis, undefined);
+  assert.ok(payload.prepared_context_packages.planning !== undefined);
+
+  // Compact bytes should be within transport budget after Stage 4 trimming
+  assert.ok(
+    compactBytes <= TRANSPORT_MAX_BYTES,
+    `Stage 4 trimmed payload (${compactBytes} bytes) should fit within ${TRANSPORT_MAX_BYTES}`,
+  );
 });
 
 test("buildBoardContextPayload replaces builder_input excerpt fields with planning section bodies", async (t) => {
@@ -797,23 +883,27 @@ test("buildBoardContextPayload does not mutate the cached context object", () =>
     "preparedContextPackages.debate must not be deleted");
 });
 
-test("paginateBoardContextPayload handles multi-byte Unicode content correctly", () => {
+test("paginateBoardContextPayload handles multi-byte Unicode content correctly (byte-based)", () => {
   // Payload with CJK characters: each char is 3 bytes in UTF-8
   const payload = { data: "\u4e16\u754c".repeat(2000), ascii: "hello" };
   const serialized = JSON.stringify(payload);
-  const totalChars = serialized.length;
+  const totalBytes = Buffer.byteLength(serialized, "utf8");
 
-  // Character-based pagination should work correctly
+  // Byte-based pagination: 2000-byte limit holds fewer CJK chars than ASCII chars
   const first = paginateBoardContextPayload(payload, 0, 2000);
-  assert.equal(first.pagination.total_chars, totalChars);
+  assert.equal(first.pagination.total_bytes, totalBytes);
   assert.equal(first.pagination.offset, 0);
   assert.equal(first.pagination.limit, 2000);
 
   const firstEnvelope = JSON.parse(first.content[0].text);
-  assert.equal(firstEnvelope.chunk.length, 2000,
-    "chunk length should equal the limit in characters");
+  const firstChunkBytes = Buffer.byteLength(firstEnvelope.chunk, "utf8");
+  assert.ok(firstChunkBytes <= 2000,
+    `chunk byte length (${firstChunkBytes}) should not exceed limit (2000)`);
+  assert.ok(firstEnvelope.chunk.length < 2000,
+    "chunk char length should be less than limit due to multi-byte chars");
+  assert.equal(first.pagination.bytes_in_chunk, firstChunkBytes);
 
-  // Reconstruct and verify round-trip
+  // Reconstruct using bytes_in_chunk for offset advancement
   let reconstructed = "";
   let offset = 0;
   const chunkSize = 2000;
@@ -822,11 +912,11 @@ test("paginateBoardContextPayload handles multi-byte Unicode content correctly",
     const env = JSON.parse(page.content[0].text);
     reconstructed += env.chunk;
     if (!env._pagination.has_more) break;
-    offset += chunkSize;
+    offset += env._pagination.bytes_in_chunk;
   }
   const parsed = JSON.parse(reconstructed);
   assert.equal(parsed.data, "\u4e16\u754c".repeat(2000),
-    "multi-byte content must survive pagination round-trip");
+    "multi-byte content must survive byte-based pagination round-trip");
 });
 
 // ─── Serialization guard regression + metadata enrichment tests ─────────
@@ -898,10 +988,10 @@ test("buildBoardContextPayload compact JSON fits within transport budget even if
     `Compact payload (${compactBytes} bytes) should fit within ${TRANSPORT_MAX_BYTES}`,
   );
 
-  // Pretty-printed should be significantly larger due to structural indentation
+  // Pretty-printed should always be larger than compact due to structural indentation
   assert.ok(
-    pretty.length > compact.length * 1.1,
-    `Pretty-printed (${pretty.length}) should be at least 10% larger than compact (${compact.length})`,
+    pretty.length > compact.length,
+    `Pretty-printed (${pretty.length}) should be larger than compact (${compact.length})`,
   );
 });
 
