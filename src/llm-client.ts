@@ -76,9 +76,10 @@ export class LlmClient {
     abortSignal?: AbortSignal;
   }): Promise<{ text: string }> {
     // @ts-expect-error — Dual-package type mismatch: @ai-sdk/provider@3.0.8
-    // (transitive from auggie-sdk) vs ai@5 internal @ai-sdk/provider@2.0.1.
+    // (transitive from auggie-sdk@0.1.15) vs @ai-sdk/provider@2.0.1 (ai@5.0.179).
     // Both define LanguageModelV2 identically but TypeScript treats them as
     // incompatible nominal types. Safe at runtime (ai@5 uses duck-typing).
+    // TODO: remove when auggie-sdk aligns with ai@5's provider version.
     return generateText(args);
   }
 
