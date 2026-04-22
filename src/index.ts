@@ -583,6 +583,90 @@ server.tool(
   },
 );
 
+// ─── Tool: review_store_artifact ────────────────────────────────────────
+// Blackboard: store a named artifact for inter-phase transport.
+
+server.tool(
+  "review_store_artifact",
+  "Store a named artifact in the blackboard for inter-phase transport within a review run. " +
+    "Artifacts are keyed by (session_id, artifact_key) and held in memory. " +
+    "Max 100K chars per artifact, 500K total per session.",
+  {
+    session_id: z.string().describe("Session ID for artifact scoping"),
+    artifact_key: z
+      .string()
+      .describe('Artifact key, e.g. "phase2/claude_plan" or "context/slim"'),
+    artifact_value: z.string().describe("Full text content of the artifact"),
+    metadata: z
+      .object({
+        phase: z.number().optional(),
+        agent_name: z.string().optional(),
+        token_estimate: z.number().optional(),
+      })
+      .optional()
+      .describe("Optional metadata for debugging and manifest assembly"),
+  },
+  async ({ session_id, artifact_key, artifact_value, metadata }) => {
+    try {
+      const result = manager.storeArtifact(session_id, artifact_key, artifact_value, metadata ?? undefined);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      };
+    } catch (err) {
+      return toErrorResult(err);
+    }
+  },
+);
+
+// ─── Tool: review_read_artifact ─────────────────────────────────────────
+// Blackboard: read one or more artifacts by key.
+
+server.tool(
+  "review_read_artifact",
+  "Read one or more artifacts from the blackboard by key. " +
+    "Returns artifact values and lists any missing keys.",
+  {
+    session_id: z.string().describe("Session ID for artifact scoping"),
+    artifact_keys: z
+      .array(z.string())
+      .describe('Artifact keys to read, e.g. ["phase2/claude_plan", "context/slim"]'),
+  },
+  async ({ session_id, artifact_keys }) => {
+    try {
+      const result = manager.readArtifacts(session_id, artifact_keys);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      };
+    } catch (err) {
+      return toErrorResult(err);
+    }
+  },
+);
+
+// ─── Tool: review_clear_artifacts ───────────────────────────────────────
+// Blackboard: evict artifacts by key prefix at phase boundaries.
+
+server.tool(
+  "review_clear_artifacts",
+  "Evict artifacts matching a key prefix from the blackboard. " +
+    "Use at phase boundaries to prevent stale artifact leakage. " +
+    'Example: prefix "phase2/" clears all Phase 2 artifacts.',
+  {
+    session_id: z.string().describe("Session ID for artifact scoping"),
+    prefix: z.string().describe('Key prefix to match, e.g. "phase2/" or "context/full"'),
+  },
+  async ({ session_id, prefix }) => {
+    try {
+      const result = manager.clearArtifacts(session_id, prefix);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      };
+    } catch (err) {
+      return toErrorResult(err);
+    }
+  },
+);
+
 // ─── Tool: review_normalize_plans ───────────────────────────────────────
 // LLM-powered: extract compact deltas from Phase 2 plans for debate.
 

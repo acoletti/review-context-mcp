@@ -21,6 +21,18 @@ const CACHE_DIR = join(
 const MAX_FILE_SIZE_BYTES = 1_000_000; // 1MB — SDK limit
 const MAX_CACHE_ENTRIES = 500; // FIFO eviction — oldest entry by insertion order
 const MAX_BOARD_CACHE_ENTRIES = 50; // FIFO eviction — board contexts are larger per entry
+export const MAX_ARTIFACT_CHARS = 100_000; // per artifact
+export const MAX_ARTIFACT_TOTAL_CHARS = 500_000; // per session
+
+interface ArtifactEntry {
+  value: string;
+  metadata?: {
+    phase?: number;
+    agent_name?: string;
+    token_estimate?: number;
+  };
+  storedAt: number;
+}
 
 interface CachedResult {
   query: string;
@@ -320,6 +332,7 @@ export class ContextManager {
   private ctx: DirectContext | null = null;
   private resultCache = new Map<string, CachedResult>();
   private boardContextCache = new Map<string, PreparedBoardContext>();
+  private artifactStore = new Map<string, Map<string, ArtifactEntry>>();
   private sessionId: string | null = null;
   private workspaceRoot: string | null = null;
   private indexingComplete = false;
@@ -791,6 +804,7 @@ export class ContextManager {
       this.indexingComplete = false;
       this.resultCache.clear();
       this.boardContextCache.clear();
+      this.artifactStore.clear();
     }
 
     this.ctx = await DirectContext.create({
@@ -1355,6 +1369,93 @@ export class ContextManager {
     };
   }
 
+  // ─── Artifact blackboard ─────────────────────────────────────────────
+
+  private sessionTotalChars(sessionId: string): number {
+    const bucket = this.artifactStore.get(sessionId);
+    if (!bucket) return 0;
+    let total = 0;
+    for (const entry of bucket.values()) total += entry.value.length;
+    return total;
+  }
+
+  storeArtifact(
+    sessionId: string,
+    key: string,
+    value: string,
+    metadata?: ArtifactEntry["metadata"],
+  ): { stored: true; key: string; chars: number } {
+    if (value.length > MAX_ARTIFACT_CHARS) {
+      throw new Error(
+        `Artifact "${key}" exceeds ${MAX_ARTIFACT_CHARS} character limit (${value.length} chars)`,
+      );
+    }
+
+    let bucket = this.artifactStore.get(sessionId);
+    if (!bucket) {
+      bucket = new Map();
+      this.artifactStore.set(sessionId, bucket);
+    }
+
+    const existingChars = bucket.get(key)?.value.length ?? 0;
+    const newTotal = this.sessionTotalChars(sessionId) - existingChars + value.length;
+    if (newTotal > MAX_ARTIFACT_TOTAL_CHARS) {
+      throw new Error(
+        `Session "${sessionId}" would exceed ${MAX_ARTIFACT_TOTAL_CHARS} character artifact limit ` +
+        `(current: ${this.sessionTotalChars(sessionId) - existingChars}, adding: ${value.length})`,
+      );
+    }
+
+    bucket.set(key, { value, metadata, storedAt: Date.now() });
+    this.log(`Artifact stored: ${sessionId}/${key} (${value.length} chars)`);
+    return { stored: true, key, chars: value.length };
+  }
+
+  readArtifacts(
+    sessionId: string,
+    keys: string[],
+  ): { artifacts: Record<string, string | null>; missing: string[] } {
+    const bucket = this.artifactStore.get(sessionId);
+    const artifacts: Record<string, string | null> = {};
+    const missing: string[] = [];
+
+    for (const key of keys) {
+      const entry = bucket?.get(key);
+      if (entry) {
+        artifacts[key] = entry.value;
+      } else {
+        artifacts[key] = null;
+        missing.push(key);
+      }
+    }
+
+    this.log(`Artifacts read: ${keys.length} requested, ${missing.length} missing`);
+    return { artifacts, missing };
+  }
+
+  clearArtifacts(
+    sessionId: string,
+    prefix: string,
+  ): { cleared: string[]; count: number } {
+    const bucket = this.artifactStore.get(sessionId);
+    if (!bucket) return { cleared: [], count: 0 };
+
+    const cleared: string[] = [];
+    for (const key of bucket.keys()) {
+      if (key.startsWith(prefix)) {
+        bucket.delete(key);
+        cleared.push(key);
+      }
+    }
+
+    if (bucket.size === 0) {
+      this.artifactStore.delete(sessionId);
+    }
+
+    this.log(`Artifacts cleared: ${cleared.length} keys matching "${prefix}"`);
+    return { cleared, count: cleared.length };
+  }
+
   async clear(): Promise<void> {
     if (this.ctx) {
       try {
@@ -1369,5 +1470,6 @@ export class ContextManager {
     this.indexingComplete = false;
     this.resultCache.clear();
     this.boardContextCache.clear();
+    this.artifactStore.clear();
   }
 }

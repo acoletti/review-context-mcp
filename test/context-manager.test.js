@@ -10,7 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { z } from "zod";
-import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "../dist/context-manager.js";
+import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES, MAX_ARTIFACT_CHARS, MAX_ARTIFACT_TOTAL_CHARS } from "../dist/context-manager.js";
 
 const CACHE_DIR = join(homedir(), ".claude", "review-cache");
 
@@ -1107,4 +1107,148 @@ test("listSessions handles old meta.json without boardContextCount", async (t) =
 
   assert.ok(found, `session ${id} should appear in list`);
   assert.equal(found.boardContextCount, undefined, "boardContextCount should be undefined for old sessions");
+});
+
+// ─── Artifact blackboard tests ──────────────────────────────────────────
+
+test("storeArtifact stores and readArtifacts retrieves", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  manager.storeArtifact(sid, "phase2/claude_plan", "plan content here");
+  const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/claude_plan"]);
+
+  assert.equal(artifacts["phase2/claude_plan"], "plan content here");
+  assert.equal(missing.length, 0);
+});
+
+test("readArtifacts returns null and lists missing keys", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  const { artifacts, missing } = manager.readArtifacts(sid, ["nonexistent/key"]);
+
+  assert.equal(artifacts["nonexistent/key"], null);
+  assert.deepEqual(missing, ["nonexistent/key"]);
+});
+
+test("storeArtifact overwrites existing key", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  manager.storeArtifact(sid, "context/slim", "v1");
+  manager.storeArtifact(sid, "context/slim", "v2");
+  const { artifacts } = manager.readArtifacts(sid, ["context/slim"]);
+
+  assert.equal(artifacts["context/slim"], "v2");
+});
+
+test("storeArtifact rejects artifact exceeding per-artifact char limit", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  const oversized = "x".repeat(MAX_ARTIFACT_CHARS + 1);
+
+  assert.throws(
+    () => manager.storeArtifact(sid, "big", oversized),
+    /exceeds.*character limit/,
+  );
+});
+
+test("storeArtifact rejects when session total would exceed limit", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  // Fill to near the limit
+  const chunkSize = MAX_ARTIFACT_CHARS;
+  const chunks = Math.floor(MAX_ARTIFACT_TOTAL_CHARS / chunkSize);
+  for (let i = 0; i < chunks; i++) {
+    manager.storeArtifact(sid, `fill/${i}`, "x".repeat(chunkSize));
+  }
+
+  // Next store should exceed total
+  assert.throws(
+    () => manager.storeArtifact(sid, "overflow", "x".repeat(chunkSize)),
+    /would exceed.*artifact limit/,
+  );
+});
+
+test("storeArtifact allows overwrite without double-counting size", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  manager.storeArtifact(sid, "key", "x".repeat(MAX_ARTIFACT_CHARS));
+  // Overwrite with same-size value should succeed (not double-count)
+  manager.storeArtifact(sid, "key", "y".repeat(MAX_ARTIFACT_CHARS));
+  const { artifacts } = manager.readArtifacts(sid, ["key"]);
+
+  assert.equal(artifacts["key"].length, MAX_ARTIFACT_CHARS);
+  assert.equal(artifacts["key"][0], "y");
+});
+
+test("clearArtifacts removes keys matching prefix", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  manager.storeArtifact(sid, "phase2/claude", "plan1");
+  manager.storeArtifact(sid, "phase2/implementer", "plan2");
+  manager.storeArtifact(sid, "context/slim", "slim ctx");
+
+  const result = manager.clearArtifacts(sid, "phase2/");
+
+  assert.deepEqual(result.cleared.sort(), ["phase2/claude", "phase2/implementer"]);
+  assert.equal(result.count, 2);
+
+  // phase2 keys gone, context/slim still present
+  const { artifacts, missing } = manager.readArtifacts(sid, [
+    "phase2/claude", "phase2/implementer", "context/slim",
+  ]);
+  assert.equal(artifacts["phase2/claude"], null);
+  assert.equal(artifacts["phase2/implementer"], null);
+  assert.equal(artifacts["context/slim"], "slim ctx");
+  assert.equal(missing.length, 2);
+});
+
+test("clearArtifacts with exact key prefix clears single artifact", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  manager.storeArtifact(sid, "context/full", "full ctx");
+  manager.storeArtifact(sid, "context/slim", "slim ctx");
+
+  const result = manager.clearArtifacts(sid, "context/full");
+
+  assert.equal(result.count, 1);
+  const { artifacts } = manager.readArtifacts(sid, ["context/full", "context/slim"]);
+  assert.equal(artifacts["context/full"], null);
+  assert.equal(artifacts["context/slim"], "slim ctx");
+});
+
+test("clearArtifacts on nonexistent session returns empty", () => {
+  const manager = new ContextManager(false);
+
+  const result = manager.clearArtifacts("no-such-session", "phase2/");
+  assert.equal(result.count, 0);
+  assert.deepEqual(result.cleared, []);
+});
+
+test("clear() wipes artifact store", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  manager.storeArtifact(sid, "phase2/plan", "some plan");
+  await manager.clear();
+
+  const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/plan"]);
+  assert.equal(artifacts["phase2/plan"], null);
+  assert.deepEqual(missing, ["phase2/plan"]);
+});
+
+test("storeArtifact preserves metadata", () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+
+  manager.storeArtifact(sid, "phase2/claude", "plan", { phase: 2, agent_name: "claude", token_estimate: 500 });
+  // Metadata is stored internally — verify via readArtifacts that value is intact
+  const { artifacts } = manager.readArtifacts(sid, ["phase2/claude"]);
+  assert.equal(artifacts["phase2/claude"], "plan");
 });
