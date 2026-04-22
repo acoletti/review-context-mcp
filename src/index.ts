@@ -6,9 +6,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ContextManager, toErrorMessage, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "./context-manager.js";
+import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "./context-manager.js";
 import { LlmClient } from "./llm-client.js";
 import {
+  toErrorResult,
   createNormalizePlansHandler,
   createDeriveQueriesHandler,
   createSummarizeContextHandler,
@@ -65,10 +66,7 @@ server.tool(
         content: [{ type: "text" as const, text: summary.join("\n") }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -110,10 +108,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -144,10 +139,7 @@ server.tool(
         content: [{ type: "text" as const, text: `${prefix}${result}` }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -186,10 +178,7 @@ server.tool(
         content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -217,10 +206,7 @@ server.tool(
         content: [{ type: "text" as const, text: result }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -373,10 +359,7 @@ server.tool(
         content: [{ type: "text" as const, text: serialized }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -414,10 +397,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -451,10 +431,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -489,10 +466,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -519,10 +493,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -553,10 +524,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -591,10 +559,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -613,10 +578,7 @@ server.tool(
         content: [{ type: "text" as const, text: "Index and cache cleared." }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );

@@ -1,7 +1,5 @@
 import type { LlmClient } from "./llm-client.js";
 
-// TODO: Consolidate with toErrorMessage() in context-manager.ts — identical
-// ErrorResult shape, maintenance risk if error formatting changes in one but not the other.
 export function toErrorResult(err: unknown): {
   content: Array<{ type: "text"; text: string }>;
   isError: true;
