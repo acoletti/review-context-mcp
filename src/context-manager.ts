@@ -123,6 +123,9 @@ interface PreparedBoardContext {
 interface PersistedCaches {
   searchResults: Array<[string, CachedResult]>;
   boardContexts?: Array<[string, PreparedBoardContext]>;
+  // Per-session blackboard artifacts. Optional for backward compatibility with
+  // session cache files written before artifact persistence was added.
+  artifacts?: Array<[string, ArtifactEntry]>;
 }
 
 interface PrepareBoardContextOptions {
@@ -1169,9 +1172,14 @@ export class ContextManager {
     // Atomic writes: temp file + rename
     const metaTmp = `${metaPath}.tmp`;
     const cacheTmp = `${cachePath}.tmp`;
+    // Include this session's blackboard artifacts in the persisted cache so they
+    // survive MCP daemon restarts (previously they were in-memory only and lost
+    // when the server stopped). Restored in resumeSession.
+    const sessionArtifacts = this.artifactStore.get(id);
     const persistedCaches: PersistedCaches = {
       searchResults: Array.from(this.resultCache.entries()),
       boardContexts: Array.from(this.boardContextCache.entries()),
+      artifacts: sessionArtifacts ? Array.from(sessionArtifacts.entries()) : [],
     };
 
     await writeFile(metaTmp, JSON.stringify(meta, null, 2));
@@ -1184,7 +1192,8 @@ export class ContextManager {
     this.log(
       `Session saved: ${id} (${indexedPaths.length} files, ` +
       `${persistedCaches.searchResults.length} cached searches, ` +
-      `${persistedCaches.boardContexts?.length ?? 0} board contexts)`,
+      `${persistedCaches.boardContexts?.length ?? 0} board contexts, ` +
+      `${persistedCaches.artifacts?.length ?? 0} artifacts)`,
     );
     return id;
   }
@@ -1239,6 +1248,9 @@ export class ContextManager {
     // Map iterates in insertion order (ES2015); FIFO eviction evicts oldest-serialized entry.
     this.resultCache.clear();
     this.boardContextCache.clear();
+    // Clear only THIS session's artifacts before restoring (other sessions' artifacts
+    // in the in-memory store should be preserved).
+    this.artifactStore.delete(sessionId);
     try {
       const parsed: PersistedCaches | Array<[string, CachedResult]> = JSON.parse(
         await readFile(cachePath, "utf-8"),
@@ -1258,6 +1270,19 @@ export class ContextManager {
         : [];
       for (const [key, value] of boardEntries) {
         this.boardContextCache.set(key, value);
+      }
+
+      // Restore blackboard artifacts for this session (graceful on missing field
+      // for backward compatibility with cache files written before this feature).
+      const artifactEntries = !Array.isArray(parsed) && Array.isArray(parsed.artifacts)
+        ? parsed.artifacts
+        : [];
+      if (artifactEntries.length > 0) {
+        const bucket = new Map<string, ArtifactEntry>();
+        for (const [key, value] of artifactEntries) {
+          bucket.set(key, value);
+        }
+        this.artifactStore.set(sessionId, bucket);
       }
     } catch {
       this.log(`Missing or corrupt cache file for session ${sessionId}, starting with empty cache`);
