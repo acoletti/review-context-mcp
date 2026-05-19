@@ -3,6 +3,9 @@ import {
   AugmentLanguageModel,
   resolveAugmentCredentials,
 } from "@augmentcode/auggie-sdk";
+import { readFile } from "fs/promises";
+import { homedir } from "os";
+import { join } from "path";
 
 export interface LlmGenerateOptions {
   model?: string;
@@ -15,6 +18,24 @@ const DEFAULT_TIMEOUT_MS = parseInt(
   process.env.REVIEW_LLM_TIMEOUT_MS ?? "30000",
   10,
 );
+
+interface AugmentSessionFile {
+  accessToken?: string;
+  tenantURL?: string;
+}
+
+async function readAugmentSessionCredentials(): Promise<{ apiKey: string; apiUrl: string } | null> {
+  try {
+    const raw = await readFile(join(homedir(), ".augment", "session.json"), "utf-8");
+    const parsed = JSON.parse(raw) as AugmentSessionFile;
+    if (parsed.accessToken && parsed.tenantURL) {
+      return { apiKey: parsed.accessToken, apiUrl: parsed.tenantURL };
+    }
+  } catch {
+    // Optional fallback only. Caller will continue to SDK resolution.
+  }
+  return null;
+}
 
 export class LlmClient {
   private defaultModel: string;
@@ -39,12 +60,18 @@ export class LlmClient {
 
   /** Override point for tests — replace to skip real credential resolution. */
   async _resolveCredentials(): Promise<{ apiKey: string; apiUrl: string }> {
-    // Prefer env vars (already set in start.sh), fall back to SDK resolution
-    if (process.env.AUGMENT_API_TOKEN && process.env.AUGMENT_API_URL) {
+    // Prefer explicit env vars. AUGMENT_API_URL can be omitted when the user
+    // already has a valid ~/.augment/session.json from `auggie login`; in that
+    // case we pair AUGMENT_API_TOKEN with the tenantURL from the session file.
+    const sessionCredentials = await readAugmentSessionCredentials();
+    if (process.env.AUGMENT_API_TOKEN && (process.env.AUGMENT_API_URL || sessionCredentials?.apiUrl)) {
       return {
         apiKey: process.env.AUGMENT_API_TOKEN,
-        apiUrl: process.env.AUGMENT_API_URL,
+        apiUrl: process.env.AUGMENT_API_URL ?? sessionCredentials!.apiUrl,
       };
+    }
+    if (sessionCredentials) {
+      return sessionCredentials;
     }
     const creds = await resolveAugmentCredentials();
     return { apiKey: creds.apiKey, apiUrl: creds.apiUrl };

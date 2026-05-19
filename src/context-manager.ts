@@ -3,8 +3,8 @@
  */
 import { DirectContext, type File, type IndexingResult } from "@augmentcode/auggie-sdk";
 import { execFile } from "child_process";
-import { readFile, writeFile, rename, unlink, stat, readdir } from "fs/promises";
-import { mkdirSync } from "fs";
+import { readFile, writeFile, rename, unlink, stat, readdir, mkdir } from "fs/promises";
+import { mkdirSync, readFileSync, statSync } from "fs";
 import { join, resolve, relative } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
@@ -17,6 +17,7 @@ const CACHE_DIR = join(
   ".claude",
   "review-cache",
 );
+const RESEARCH_DIR = join(CACHE_DIR, "research");
 
 const MAX_FILE_SIZE_BYTES = 1_000_000; // 1MB — SDK limit
 const MAX_CACHE_ENTRIES = 500; // FIFO eviction — oldest entry by insertion order
@@ -32,6 +33,25 @@ interface ArtifactEntry {
     token_estimate?: number;
   };
   storedAt: number;
+}
+
+interface ResearchMetadata {
+  title:            string;
+  summary:          string;
+  tags:             string[];
+  workflow?:        string;
+  producing_agent?: string;
+  outcome?:         "confirmed" | "partial" | "inconclusive";
+  confidence?:      number;
+  keywords?:        string[];
+}
+
+export interface ResearchEntry {
+  slug:      string;
+  content:   string;
+  metadata:  ResearchMetadata;
+  date:      string;
+  storedAt:  number;
 }
 
 interface CachedResult {
@@ -336,10 +356,24 @@ export class ContextManager {
   private resultCache = new Map<string, CachedResult>();
   private boardContextCache = new Map<string, PreparedBoardContext>();
   private artifactStore = new Map<string, Map<string, ArtifactEntry>>();
+  private researchStore = new Map<string, ResearchEntry>();
   private sessionId: string | null = null;
   private workspaceRoot: string | null = null;
   private indexingComplete = false;
   private debug: boolean;
+  private _inflight: Promise<unknown> = Promise.resolve();
+
+  private _enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    this._inflight = this._inflight.then(() => fn(), () => fn());
+    return this._inflight as Promise<T>;
+   }
+
+  /** Run an async operation sequentially — prevents response ordering issues
+     when the SDK yields to the event loop during I/O (e.g., DirectContext.importFromFile). */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    return this._enqueue(fn);
+    }
+
 
   constructor(debug = false) {
     this.debug = debug;
@@ -1133,7 +1167,7 @@ export class ContextManager {
    */
   async saveSession(sessionId?: string): Promise<string> {
     if (!this.ctx) {
-      throw new Error("No active index to save");
+      this.log("saveSession: no active index — persisting artifacts/metadata only");
     }
 
     const id = sessionId ?? this.sessionId ?? "default";
@@ -1144,13 +1178,18 @@ export class ContextManager {
     // Get indexed paths before export (may throw on search-only context)
     let indexedPaths: string[] = [];
     try {
-      indexedPaths = this.ctx.getIndexedPaths();
+      indexedPaths = this.ctx?.getIndexedPaths() ?? [];
     } catch {
       this.log("getIndexedPaths() failed — saving with empty paths list");
     }
 
     // Save index state (SDK-controlled write)
-    await this.ctx.exportToFile(statePath, { mode: "full" });
+    if (this.ctx) {
+      await this.ctx.exportToFile(statePath, { mode: "full" });
+      } else {
+      // No ctx — write minimal state file so resumeSession can find this session
+      await writeFile(statePath, JSON.stringify({ mode: "full", addedBlobs: [], deletedBlobs: [], blobs: [] }, null, 2));
+      }
 
     // Preserve createdAt from existing metadata
     let createdAt = Date.now();
@@ -1202,103 +1241,96 @@ export class ContextManager {
    * Resume a previously saved session.
    * Gracefully handles missing or corrupt meta/cache files.
    */
-  async resumeSession(sessionId: string): Promise<{
+  resumeSession(sessionId: string): {
     indexedFiles: number;
     cachedResults: number;
     boardContextCount: number;
     sessionAge: number;
     workspaceRoot: string;
-  }> {
+    } {
     const statePath = this.sessionPath(sessionId);
     const metaPath = this.sessionMetaPath(sessionId);
     const cachePath = this.sessionCachePath(sessionId);
 
-    // Verify state file exists before attempting import
+     // Verify state file exists
     try {
-      await stat(statePath);
+      statSync(statePath);
     } catch {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    // Restore index
-    this.ctx = await DirectContext.importFromFile(statePath, {
-      debug: this.debug,
-      clientUserAgent: "review-context-mcp/0.1.0",
-    });
-    this.sessionId = sessionId;
-    this.indexingComplete = true; // Restored from a completed session
-
-    // Restore metadata (graceful on missing/corrupt)
+     // Restore metadata (synchronous read)
     let meta: SessionMeta = {
       sessionId,
       createdAt: 0,
       indexedPaths: [],
       workspaceRoot: "",
-    };
+      };
     try {
-      meta = JSON.parse(await readFile(metaPath, "utf-8"));
+      meta = JSON.parse(readFileSync(metaPath, "utf-8"));
     } catch {
       this.log(`Missing or corrupt meta file for session ${sessionId}, using defaults`);
-    }
-    // Always set workspaceRoot from meta (possibly the default fallback)
-    // so it is never left null after a resume
+      }
+
     this.workspaceRoot = meta.workspaceRoot || null;
 
-    // Restore result cache (graceful on missing/corrupt).
-    // Map iterates in insertion order (ES2015); FIFO eviction evicts oldest-serialized entry.
+     // Restore caches (synchronous reads)
     this.resultCache.clear();
     this.boardContextCache.clear();
-    // Clear only THIS session's artifacts before restoring (other sessions' artifacts
-    // in the in-memory store should be preserved).
     this.artifactStore.delete(sessionId);
+
+     // Set ctx to null — DirectContext will be lazily initialized on first search
+    // This avoids the slow async importFromFile that causes response ordering bugs
+    this.ctx = null;
+    this.indexingComplete = true;
+
     try {
       const parsed: PersistedCaches | Array<[string, CachedResult]> = JSON.parse(
-        await readFile(cachePath, "utf-8"),
-      );
+        readFileSync(cachePath, "utf-8"),
+        );
 
       const searchEntries = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray(parsed.searchResults)
-          ? parsed.searchResults
-          : [];
+         ? parsed
+         : Array.isArray(parsed.searchResults)
+           ? parsed.searchResults
+           : [];
       for (const [key, value] of searchEntries) {
         this.resultCache.set(key, value);
-      }
+        }
 
       const boardEntries = !Array.isArray(parsed) && Array.isArray(parsed.boardContexts)
-        ? parsed.boardContexts
-        : [];
+         ? parsed.boardContexts
+         : [];
       for (const [key, value] of boardEntries) {
         this.boardContextCache.set(key, value);
-      }
+        }
 
-      // Restore blackboard artifacts for this session (graceful on missing field
-      // for backward compatibility with cache files written before this feature).
+       // Restore blackboard artifacts
       const artifactEntries = !Array.isArray(parsed) && Array.isArray(parsed.artifacts)
-        ? parsed.artifacts
-        : [];
+         ? parsed.artifacts
+         : [];
       if (artifactEntries.length > 0) {
         const bucket = new Map<string, ArtifactEntry>();
         for (const [key, value] of artifactEntries) {
           bucket.set(key, value);
-        }
+          }
         this.artifactStore.set(sessionId, bucket);
-      }
-    } catch {
+        }
+      } catch {
       this.log(`Missing or corrupt cache file for session ${sessionId}, starting with empty cache`);
-    }
+      }
 
-    // Enforce caps in case limits were lowered since the session was saved
+     // Enforce caps
     while (this.resultCache.size > MAX_CACHE_ENTRIES) {
       const firstKey = this.resultCache.keys().next().value;
       if (firstKey !== undefined) this.resultCache.delete(firstKey);
       else break;
-    }
+      }
     while (this.boardContextCache.size > MAX_BOARD_CACHE_ENTRIES) {
       const firstKey = this.boardContextCache.keys().next().value;
       if (firstKey !== undefined) this.boardContextCache.delete(firstKey);
       else break;
-    }
+      }
 
     this.log(`Session resumed: ${sessionId}`);
 
@@ -1308,8 +1340,9 @@ export class ContextManager {
       boardContextCount: this.boardContextCache.size,
       sessionAge: meta.createdAt > 0 ? Date.now() - meta.createdAt : 0,
       workspaceRoot: this.workspaceRoot ?? "",
-    };
-  }
+      };
+    }
+
 
   async listSessions(): Promise<SessionMeta[]> {
     const sessions: SessionMeta[] = [];
@@ -1441,6 +1474,7 @@ export class ContextManager {
     keys: string[],
   ): { artifacts: Record<string, string | null>; missing: string[] } {
     const bucket = this.artifactStore.get(sessionId);
+    this.log(`DEBUG readArtifacts: sid=${sessionId}, bucket=${bucket ? 'found('+bucket.size+')' : 'null'}, storeKeys=${Array.from(this.artifactStore.keys()).join('|')}`);
     const artifacts: Record<string, string | null> = {};
     const missing: string[] = [];
 
@@ -1481,6 +1515,69 @@ export class ContextManager {
     return { cleared, count: cleared.length };
   }
 
+  // ─── Research store ──────────────────────────────────────────────────
+
+  async saveResearch(
+    slug: string,
+    content: string,
+    metadata: ResearchMetadata,
+  ): Promise<ResearchEntry> {
+    const entry: ResearchEntry = {
+      slug,
+      content,
+      metadata,
+      date: new Date().toISOString(),
+      storedAt: Date.now(),
+    };
+    this.researchStore.set(slug, entry);
+    await mkdir(RESEARCH_DIR, { recursive: true });
+    const filePath = join(RESEARCH_DIR, `${slug}.json`);
+    const tmp = `${filePath}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify(entry, null, 2));
+      await rename(tmp, filePath);
+    } catch (err) {
+      await unlink(tmp).catch(() => undefined);
+      throw err;
+    }
+    this.log(`Research saved: ${slug}`);
+    return entry;
+  }
+
+  async findResearch(query: string): Promise<ResearchEntry[]> {
+    await this._loadResearchFromDisk();
+    const q = query.toLowerCase();
+    const results: ResearchEntry[] = [];
+    for (const entry of this.researchStore.values()) {
+      const haystack = [
+        entry.slug,
+        entry.metadata.title,
+        entry.metadata.summary,
+        ...entry.metadata.tags,
+        ...(entry.metadata.keywords ?? []),
+      ].join(" ").toLowerCase();
+      if (haystack.includes(q)) {
+        results.push(entry);
+      }
+    }
+    return results.sort((a, b) => b.storedAt - a.storedAt);
+  }
+
+  private async _loadResearchFromDisk(): Promise<void> {
+    try {
+      const files = await readdir(RESEARCH_DIR);
+      for (const file of files) {
+        if (!file.endsWith(".json") || file.endsWith(".tmp")) continue;
+        const slug = file.replace(/\.json$/, "");
+        if (this.researchStore.has(slug)) continue;
+        const raw = await readFile(join(RESEARCH_DIR, file), "utf-8");
+        this.researchStore.set(slug, JSON.parse(raw) as ResearchEntry);
+      }
+    } catch {
+      // RESEARCH_DIR may not exist yet
+    }
+  }
+
   async clear(): Promise<void> {
     if (this.ctx) {
       try {
@@ -1496,5 +1593,6 @@ export class ContextManager {
     this.resultCache.clear();
     this.boardContextCache.clear();
     this.artifactStore.clear();
+    this.researchStore.clear();
   }
 }

@@ -6,7 +6,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "./context-manager.js";
+import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES, toErrorMessage } from "./context-manager.js";
 import { LlmClient } from "./llm-client.js";
 import {
   toErrorResult,
@@ -791,6 +791,77 @@ server.tool(
       .describe("Model override (default: claude-sonnet-4-5)"),
   },
   createBuildPersonaDigestsHandler(llm),
+);
+
+// ─── Tool: review_save_research ─────────────────────────────────────────
+// Persist a research synthesis for later retrieval by /implement.
+
+server.tool(
+  "review_save_research",
+  "Persist a completed research synthesis so /implement can retrieve it later. " +
+    "Call at end of /research Phase 3 after presenting the synthesis to the user. " +
+    "Best-effort: if this call fails, the synthesis has already been delivered.",
+  {
+    slug: z.string().describe("URL-safe identifier, e.g. 'redis-ttl-behavior'"),
+    content: z.string().describe("Full research findings text"),
+    metadata: z.object({
+      title:           z.string(),
+      summary:         z.string(),
+      tags:            z.array(z.string()).min(1).max(10),
+      workflow:        z.string().optional(),
+      producing_agent: z.string().optional(),
+      outcome:         z.enum(["confirmed", "partial", "inconclusive"]).optional(),
+      confidence:      z.number().min(0).max(1).optional(),
+      keywords:        z.array(z.string()).optional(),
+    }).describe("Scannable index fields for LLM-driven retrieval"),
+  },
+  async ({ slug, content, metadata }) => {
+    try {
+      const entry = await manager.saveResearch(slug, content, metadata);
+      return {
+        content: [{ type: "text" as const, text: `Research saved: ${entry.slug} (${entry.date})` }],
+      };
+    } catch (err) {
+      return { isError: true as const, content: [{ type: "text" as const, text: `Failed to save research: ${toErrorMessage(err)}` }] };
+    }
+  },
+);
+
+// ─── Tool: review_find_research ─────────────────────────────────────────
+// Find prior research entries by keyword.
+
+server.tool(
+  "review_find_research",
+  "Find prior research entries by keyword. " +
+    "Call at start of /implement Phase 1 before review_prepare_board_context. " +
+    "Returns matching entries sorted by most recent first. " +
+    "Silent on miss: if no results, returns plain text and sets no isError.",
+  {
+    query: z.string().describe(
+      "Free-text keyword or topic to search across slug, title, summary, tags, and keywords"
+    ),
+  },
+  async ({ query }) => {
+    try {
+      const results = await manager.findResearch(query);
+      if (results.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "No research entries matched." }],
+        };
+      }
+      const text = results
+        .map(
+          (r) =>
+            `## ${r.metadata.title} (${r.date})\nSlug: ${r.slug}\nSummary: ${r.metadata.summary}\nTags: ${r.metadata.tags.join(", ")}\n\n${r.content}`,
+        )
+        .join("\n\n---\n\n");
+      return {
+        content: [{ type: "text" as const, text }],
+      };
+    } catch (err) {
+      return { isError: true as const, content: [{ type: "text" as const, text: `Failed to find research: ${toErrorMessage(err)}` }] };
+    }
+  },
 );
 
 // ─── Start the server ────────────────────────────────────────────────────

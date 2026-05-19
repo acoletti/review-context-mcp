@@ -1,0 +1,34 @@
+{
+  "servers": {
+    "review-context": {
+      "type": "stdio",
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "exec \"$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/start.sh\""
+      ],
+      "env": {
+        "AUGMENT_API_TOKEN": "${input:augment_api_token}"
+      }
+    },
+    "code-inference-query": {
+      "type": "stdio",
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "export CODE_INFERENCE_CORPUS_PATH=\"$HOME/Library/Mobile Documents/com~apple~CloudDocs/code-inference\" && export CODE_INFERENCE_CACHE_PATH=\"${CODE_INFERENCE_CACHE_PATH:-$HOME/.cache/code-inference-query/lance}\" && exec \"$HOME/.local/bin/code-inference-query\""
+      ]
+    },
+    "context7": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ],
+      "env": {
+        "DEFAULT_MINIMUM_TOKENS": "6000"
+      }
+    }
+  }
+}

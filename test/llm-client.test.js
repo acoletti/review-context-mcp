@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 test("LlmClient is importable and constructible", async () => {
   const { LlmClient } = await import("../dist/llm-client.js");
@@ -70,4 +74,42 @@ test("LlmClient.generate() throws on missing credentials when not initialized", 
     () => client.generate("sys", "usr"),
     { message: /credentials/i },
   );
+});
+
+test("LlmClient resolves AUGMENT_API_TOKEN with tenantURL from ~/.augment/session.json", async () => {
+  const augmentDir = join(homedir(), ".augment");
+  const sessionPath = join(augmentDir, "session.json");
+  const backupPath = join(augmentDir, `session.json.test-backup-${Date.now()}`);
+  const hadSession = existsSync(sessionPath);
+  if (hadSession) {
+    await rename(sessionPath, backupPath);
+  }
+
+  const previousToken = process.env.AUGMENT_API_TOKEN;
+  const previousUrl = process.env.AUGMENT_API_URL;
+  try {
+    await mkdir(augmentDir, { recursive: true });
+    await writeFile(sessionPath, JSON.stringify({
+      accessToken: "session-token",
+      tenantURL: "https://tenant.example.com/",
+    }));
+    process.env.AUGMENT_API_TOKEN = "env-token";
+    delete process.env.AUGMENT_API_URL;
+
+    const { LlmClient } = await import("../dist/llm-client.js");
+    const client = new LlmClient("claude-sonnet-4-5", false);
+    const creds = await client._resolveCredentials();
+
+    assert.equal(creds.apiKey, "env-token");
+    assert.equal(creds.apiUrl, "https://tenant.example.com/");
+  } finally {
+    if (previousToken === undefined) delete process.env.AUGMENT_API_TOKEN;
+    else process.env.AUGMENT_API_TOKEN = previousToken;
+    if (previousUrl === undefined) delete process.env.AUGMENT_API_URL;
+    else process.env.AUGMENT_API_URL = previousUrl;
+    await rm(sessionPath, { force: true });
+    if (hadSession) {
+      await rename(backupPath, sessionPath);
+    }
+  }
 });

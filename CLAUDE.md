@@ -9,7 +9,7 @@ Session-aware MCP server wrapping Augment's Context Engine SDK for multi-phase c
 On **each machine** (first time only):
 
 ```bash
-cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/review-context-mcp
+cd ~/personal_dev/review-context-mcp
 npm install
 npm run build
 ```
@@ -28,7 +28,7 @@ Add this to `~/.claude/settings.json` under `mcpServers`:
     "review-context": {
       "type": "stdio",
       "command": "/bin/sh",
-      "args": ["-c", "exec \"$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/start.sh\""],
+      "args": ["-c", "exec \"$HOME/personal_dev/review-context-mcp/start.sh\""],
       "env": {}
     }
   }
