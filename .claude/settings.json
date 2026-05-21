@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/acoletti/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp/**)",
+      "Bash(python3 -c \"import sys,json; data=sys.stdin.read\\(\\); arr=json.loads\\(data\\) if data.strip\\(\\).startswith\\('['\\) else []; print\\(json.dumps\\(arr[0] if arr else {}, indent=2\\)[:2000] if arr else data[:2000]\\)\")",
+      "Bash(python3 -c ':*)",
+      "Bash(npm test:*)",
+      "Bash(node --input-type=module)",
+      "Read(//Users/acoletti/.claude/code-review/personas/**)",
+      "Read(//Users/acoletti/Library/Mobile Documents/com~apple~CloudDocs/claude/code-review/personas/**)",
+      "Bash(ls -la .gitignore)",
+      "Bash(cat .gitignore)"
+    ]
+  }
+}

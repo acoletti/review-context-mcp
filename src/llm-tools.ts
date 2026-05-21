@@ -1,7 +1,5 @@
 import type { LlmClient } from "./llm-client.js";
 
-// TODO: Consolidate with toErrorMessage() in context-manager.ts — identical
-// ErrorResult shape, maintenance risk if error formatting changes in one but not the other.
 export function toErrorResult(err: unknown): {
   content: Array<{ type: "text"; text: string }>;
   isError: true;
@@ -13,15 +11,15 @@ export function toErrorResult(err: unknown): {
   };
 }
 
-interface ParseResult {
-  ok: boolean;
-  text: string;
-}
+type ParseResult =
+  | { ok: true; text: string }
+  | { ok: false; text: string };
 
 function tryParseJson(text: string): ParseResult {
   const trimmed = text.trim();
 
-  // Non-anchored: handles LLM responses with conversational framing around fences
+  // Non-anchored: handles LLM responses with conversational framing around fences.
+  // Extracts the first fenced code block only; subsequent blocks are silently ignored.
   const fenceMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   const jsonCandidate = fenceMatch ? fenceMatch[1].trim() : trimmed;
 

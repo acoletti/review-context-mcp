@@ -4,6 +4,22 @@
 # Designed for iCloud-synced multi-machine setups (no native binaries).
 set -e
 
+# Suppress Node.js deprecation warnings (e.g. punycode in v26+) that can
+# interfere with MCP clients or clutter output.
+export NODE_OPTIONS="--no-warnings"
+
+# Claude/VSCode MCP launchers often start stdio servers with a minimal,
+# non-interactive environment. Source the user's zsh config so optional LLM
+# helpers can see AUGMENT_API_TOKEN / AUGMENT_API_URL when the user keeps them
+# there. This is intentionally best-effort: a broken shell profile must not
+# prevent semantic indexing/search from starting.
+if [ -f "$HOME/.zshrc" ]; then
+  set +e
+  # shellcheck disable=SC1090
+  . "$HOME/.zshrc" >/dev/null 2>&1
+  set -e
+fi
+
 PROJ="$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp"
 cd "$PROJ"
 
@@ -12,9 +28,9 @@ if [ ! -d "$PROJ/node_modules/@augmentcode" ]; then
   npm install --ignore-scripts 1>&2
 fi
 
-# Rebuild dist if TypeScript sources are newer than compiled output.
-if [ "$PROJ/src/index.ts" -nt "$PROJ/dist/index.js" ] || \
-   [ "$PROJ/src/context-manager.ts" -nt "$PROJ/dist/index.js" ]; then
+# Rebuild dist if any TypeScript source is newer than compiled output.
+if [ ! -f "$PROJ/dist/index.js" ] || \
+   [ -n "$(find "$PROJ/src" -name '*.ts' -newer "$PROJ/dist/index.js" -print -quit 2>/dev/null)" ]; then
   npm run build 1>&2
 fi
 

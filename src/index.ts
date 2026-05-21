@@ -6,9 +6,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ContextManager, toErrorMessage, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES } from "./context-manager.js";
+import { ContextManager, buildBoardContextPayload, paginateBoardContextPayload, TRANSPORT_MAX_BYTES, toErrorMessage } from "./context-manager.js";
 import { LlmClient } from "./llm-client.js";
 import {
+  toErrorResult,
   createNormalizePlansHandler,
   createDeriveQueriesHandler,
   createSummarizeContextHandler,
@@ -65,10 +66,7 @@ server.tool(
         content: [{ type: "text" as const, text: summary.join("\n") }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -110,10 +108,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -144,10 +139,7 @@ server.tool(
         content: [{ type: "text" as const, text: `${prefix}${result}` }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -186,10 +178,7 @@ server.tool(
         content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -217,10 +206,7 @@ server.tool(
         content: [{ type: "text" as const, text: result }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -373,10 +359,7 @@ server.tool(
         content: [{ type: "text" as const, text: serialized }],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -414,10 +397,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -451,10 +431,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -489,10 +466,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -519,10 +493,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -553,10 +524,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -591,10 +559,7 @@ server.tool(
         ],
       };
     } catch (err) {
-      return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
-      };
+      return toErrorResult(err);
     }
   },
 );
@@ -613,10 +578,91 @@ server.tool(
         content: [{ type: "text" as const, text: "Index and cache cleared." }],
       };
     } catch (err) {
+      return toErrorResult(err);
+    }
+  },
+);
+
+// ─── Tool: review_store_artifact ────────────────────────────────────────
+// Blackboard: store a named artifact for inter-phase transport.
+
+server.tool(
+  "review_store_artifact",
+  "Store a named artifact in the blackboard for inter-phase transport within a review run. " +
+    "Artifacts are keyed by (session_id, artifact_key) and held in memory. " +
+    "Max 100K chars per artifact, 500K total per session.",
+  {
+    session_id: z.string().describe("Session ID for artifact scoping"),
+    artifact_key: z
+      .string()
+      .describe('Artifact key, e.g. "phase2/claude_plan" or "context/slim"'),
+    artifact_value: z.string().describe("Full text content of the artifact"),
+    metadata: z
+      .object({
+        phase: z.number().optional(),
+        agent_name: z.string().optional(),
+        token_estimate: z.number().optional(),
+      })
+      .optional()
+      .describe("Optional metadata for debugging and manifest assembly"),
+  },
+  async ({ session_id, artifact_key, artifact_value, metadata }) => {
+    try {
+      const result = manager.storeArtifact(session_id, artifact_key, artifact_value, metadata ?? undefined);
       return {
-        content: [{ type: "text" as const, text: `Error: ${toErrorMessage(err)}` }],
-        isError: true,
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
+    } catch (err) {
+      return toErrorResult(err);
+    }
+  },
+);
+
+// ─── Tool: review_read_artifact ─────────────────────────────────────────
+// Blackboard: read one or more artifacts by key.
+
+server.tool(
+  "review_read_artifact",
+  "Read one or more artifacts from the blackboard by key. " +
+    "Returns artifact values and lists any missing keys.",
+  {
+    session_id: z.string().describe("Session ID for artifact scoping"),
+    artifact_keys: z
+      .array(z.string())
+      .describe('Artifact keys to read, e.g. ["phase2/claude_plan", "context/slim"]'),
+  },
+  async ({ session_id, artifact_keys }) => {
+    try {
+      const result = manager.readArtifacts(session_id, artifact_keys);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      };
+    } catch (err) {
+      return toErrorResult(err);
+    }
+  },
+);
+
+// ─── Tool: review_clear_artifacts ───────────────────────────────────────
+// Blackboard: evict artifacts by key prefix at phase boundaries.
+
+server.tool(
+  "review_clear_artifacts",
+  "Evict artifacts matching a key prefix from the blackboard. " +
+    "Use at phase boundaries to prevent stale artifact leakage. " +
+    'Example: prefix "phase2/" clears all Phase 2 artifacts.',
+  {
+    session_id: z.string().describe("Session ID for artifact scoping"),
+    prefix: z.string().describe('Key prefix to match, e.g. "phase2/" or "context/full"'),
+  },
+  async ({ session_id, prefix }) => {
+    try {
+      const result = manager.clearArtifacts(session_id, prefix);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+      };
+    } catch (err) {
+      return toErrorResult(err);
     }
   },
 );
@@ -745,6 +791,77 @@ server.tool(
       .describe("Model override (default: claude-sonnet-4-5)"),
   },
   createBuildPersonaDigestsHandler(llm),
+);
+
+// ─── Tool: review_save_research ─────────────────────────────────────────
+// Persist a research synthesis for later retrieval by /implement.
+
+server.tool(
+  "review_save_research",
+  "Persist a completed research synthesis so /implement can retrieve it later. " +
+    "Call at end of /research Phase 3 after presenting the synthesis to the user. " +
+    "Best-effort: if this call fails, the synthesis has already been delivered.",
+  {
+    slug: z.string().describe("URL-safe identifier, e.g. 'redis-ttl-behavior'"),
+    content: z.string().describe("Full research findings text"),
+    metadata: z.object({
+      title:           z.string(),
+      summary:         z.string(),
+      tags:            z.array(z.string()).min(1).max(10),
+      workflow:        z.string().optional(),
+      producing_agent: z.string().optional(),
+      outcome:         z.enum(["confirmed", "partial", "inconclusive"]).optional(),
+      confidence:      z.number().min(0).max(1).optional(),
+      keywords:        z.array(z.string()).optional(),
+    }).describe("Scannable index fields for LLM-driven retrieval"),
+  },
+  async ({ slug, content, metadata }) => {
+    try {
+      const entry = await manager.saveResearch(slug, content, metadata);
+      return {
+        content: [{ type: "text" as const, text: `Research saved: ${entry.slug} (${entry.date})` }],
+      };
+    } catch (err) {
+      return { isError: true as const, content: [{ type: "text" as const, text: `Failed to save research: ${toErrorMessage(err)}` }] };
+    }
+  },
+);
+
+// ─── Tool: review_find_research ─────────────────────────────────────────
+// Find prior research entries by keyword.
+
+server.tool(
+  "review_find_research",
+  "Find prior research entries by keyword. " +
+    "Call at start of /implement Phase 1 before review_prepare_board_context. " +
+    "Returns matching entries sorted by most recent first. " +
+    "Silent on miss: if no results, returns plain text and sets no isError.",
+  {
+    query: z.string().describe(
+      "Free-text keyword or topic to search across slug, title, summary, tags, and keywords"
+    ),
+  },
+  async ({ query }) => {
+    try {
+      const results = await manager.findResearch(query);
+      if (results.length === 0) {
+        return {
+          content: [{ type: "text" as const, text: "No research entries matched." }],
+        };
+      }
+      const text = results
+        .map(
+          (r) =>
+            `## ${r.metadata.title} (${r.date})\nSlug: ${r.slug}\nSummary: ${r.metadata.summary}\nTags: ${r.metadata.tags.join(", ")}\n\n${r.content}`,
+        )
+        .join("\n\n---\n\n");
+      return {
+        content: [{ type: "text" as const, text }],
+      };
+    } catch (err) {
+      return { isError: true as const, content: [{ type: "text" as const, text: `Failed to find research: ${toErrorMessage(err)}` }] };
+    }
+  },
 );
 
 // ─── Start the server ────────────────────────────────────────────────────
