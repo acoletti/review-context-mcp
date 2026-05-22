@@ -20,7 +20,7 @@ if [ -f "$HOME/.zshrc" ]; then
   set -e
 fi
 
-PROJ="$HOME/Library/Mobile Documents/com~apple~CloudDocs/review-context-mcp"
+PROJ="$HOME/personal_dev/review-context-mcp"
 cd "$PROJ"
 
 # Install dependencies if missing on this machine.
