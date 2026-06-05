@@ -1,7 +1,8 @@
 #!/bin/sh
 # Review-context MCP server launcher.
 # Auto-installs dependencies and rebuilds dist when needed.
-# Designed for iCloud-synced multi-machine setups (no native binaries).
+# Runs the git checkout in ~/personal_dev (the iCloud copy is a stale
+# pre-git-era mirror; do not point PROJ back at it).
 set -e
 
 # Suppress Node.js deprecation warnings (e.g. punycode in v26+) that can
