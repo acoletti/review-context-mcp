@@ -4,64 +4,10 @@ Session-aware MCP server wrapping Augment's Context Engine SDK for multi-phase c
 
 ## Setup
 
-### 1. Install and build
-
-On **each machine** (first time only):
-
-```bash
-cd ~/personal_dev/review-context-mcp
-npm install
-npm run build
-```
-
-> **Multi-machine (iCloud):** The `start.sh` launcher auto-installs missing `node_modules` and
-> auto-rebuilds a stale `dist` when source files are newer. This means the server is self-healing
-> after iCloud syncs source changes from another machine. No manual rebuild needed day-to-day.
-
-### 2. Add to Claude Code
-
-Add this to `~/.claude/settings.json` under `mcpServers`:
-
-```json
-{
-  "mcpServers": {
-    "review-context": {
-      "type": "stdio",
-      "command": "/bin/sh",
-      "args": ["-c", "exec \"$HOME/personal_dev/review-context-mcp/start.sh\""],
-      "env": {}
-    }
-  }
-}
-```
-
-Indexing and semantic search authentication fall back to `~/.augment/session.json` automatically (created by `auggie login`). No extra env vars are needed for those tool paths.
-
-If you want to use `review_search_and_ask`, also set `AUGMENT_API_TOKEN` and `AUGMENT_API_URL` in the MCP `env` block. That tool's Augment LLM call does not use the `~/.augment/session.json` fallback used by indexing and semantic search.
-
-To enable debug logging, add `"REVIEW_CONTEXT_DEBUG": "true"` to the `env` block.
-
-### 3. Verify
-
-Restart Claude Code, then run: `review_status` — should show `Active: false`.
-
-## Tools
-
-| Tool | Purpose | When to Use |
-|------|---------|-------------|
-| `review_index_files` | Index specific files | Start of code review — index only files relevant to the change |
-| `review_index_directory` | Index a whole directory | When the review scope is broad; unreadable or oversized files are reported in the response |
-| `review_search` | Semantic search with caching | Phase 1 context gathering — results are cached for reuse |
-| `review_search_structured` | Structured semantic search | When the orchestrator wants reusable chunk IDs, file paths, and line ranges instead of one large text blob |
-| `review_search_and_ask` | Search + Augment LLM reasoning | Quick architectural questions during review; requires `AUGMENT_API_TOKEN` and `AUGMENT_API_URL` in the MCP env |
-| `review_prepare_board_context` | Build a reusable review-board context bundle | When preparing Full/Slim context packages for `code-review-board` or similar multi-agent review workflows |
-| `review_save_session` | Persist index + cache to disk | After Phase 1, so follow-up reviews skip re-indexing |
-| `review_resume_session` | Restore a saved session | When re-running a review on the same codebase |
-| `review_list_sessions` | List saved sessions | Before resuming to find the right session ID |
-| `review_delete_session` | Delete a session | Cleanup old sessions |
-| `review_status` | Show current state | Debug / verify setup |
-| `review_list_cache` | List cached search results | See what's been queried in the current session |
-| `review_clear` | Reset index and cache | Start fresh |
+See `README.md` for install, registration (Claude Code / Augment CLI / VS Code),
+verification, and troubleshooting steps — it is the canonical, single source of
+truth for setup instructions and the full tool inventory. This file covers
+architecture and internal design decisions only.
 
 ## Architecture
 

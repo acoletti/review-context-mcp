@@ -31,6 +31,9 @@ function formatAge(ms: number): string {
   return `${days}d ${hours % 24}h ago`;
 }
 
+// Tool inventory below is hand-synced with README.md's "Tool inventory"
+// table and test/mcp-stdio.test.js's EXPECTED_TOOLS list — update all
+// three together when adding, removing, or renaming a tool.
 const server = new McpServer({
   name: "review-context",
   version: "0.1.0",
@@ -865,6 +868,12 @@ server.tool(
 );
 
 // ─── Start the server ────────────────────────────────────────────────────
+// StdioServerTransport only (never StreamableHTTPServerTransport/SSE) — the
+// two known @modelcontextprotocol/sdk advisories that require an HTTP
+// listener (GHSA-w48q-cv73-mx4w DNS rebinding, GHSA-345p-7cg4-v4c7
+// cross-client leak via shared HTTP transport reuse) do not apply to this
+// server. Do not add an HTTP transport without re-auditing both advisories
+// and confirming the installed sdk version's fix status.
 
 async function main() {
   const transport = new StdioServerTransport();
