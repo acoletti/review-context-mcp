@@ -675,9 +675,10 @@ server.tool(
 
 server.tool(
   "review_normalize_plans",
-  "Extract compact normalized deltas from implementation plans for the debate phase. " +
-    "Uses Augment LLM to preserve Problem, Solution, Key files/symbols, Steps, Risks, Priority. " +
-    "Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
+  "Extract compact normalized deltas from per-agent documents (implementation plans, " +
+    "editorial reviews, etc.) for the debate phase. Uses Augment LLM. By default preserves " +
+    "Problem, Solution, Key files/symbols, Steps, Risks, Priority; override with preserve_fields " +
+    "for non-code workflows. Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
   {
     plans: z
       .array(
@@ -693,6 +694,14 @@ server.tool(
       .max(1000)
       .optional()
       .describe("Target token count per compact delta (default: 200)"),
+    preserve_fields: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Field names to preserve in each delta, overriding the implementation-plan defaults. " +
+          'Example for editorial reviews: ["First Impression", "What Works", "What Needs Work", ' +
+          '"Central Question", "Priority Ranking"]',
+      ),
     model: z
       .string()
       .optional()

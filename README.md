@@ -111,7 +111,7 @@ A stdio server that waits with open stdin is healthy.
 | `review_list_sessions` / `review_delete_session` | Manage saved sessions |
 | `review_status` / `review_list_cache` / `review_clear` | Inspect and reset in-memory state |
 | `review_store_artifact` / `review_read_artifact` / `review_clear_artifacts` | Persist/read/clear phase artifacts |
-| `review_normalize_plans` / `review_derive_queries` / `review_summarize_context` / `review_build_persona_digests` | LLM-transform helpers |
+| `review_normalize_plans` / `review_derive_queries` / `review_summarize_context` / `review_build_persona_digests` | LLM-transform helpers (`review_normalize_plans` accepts `preserve_fields` to normalize non-code documents, e.g. editorial reviews) |
 | `review_save_research` / `review_find_research` | Persist and look up research notes |
 
 If this table changes, also update `test/mcp-stdio.test.js`'s
