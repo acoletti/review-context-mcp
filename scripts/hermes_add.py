@@ -94,15 +94,20 @@ def _block_bounds(lines: list[str], name: str) -> tuple[int, int] | None:
     start = None
     for i in range(top + 1, len(lines)):
         line = lines[i]
-        if line.strip() and not line.startswith(" "):
-            break  # left the mcp_servers block entirely
         if line.rstrip() == f"  {name}:":
             start = i
             continue
-        if start is not None:
-            # Entry ends at the next sibling key or any shallower line.
-            if line.strip() and not line.startswith("    "):
-                return (start, i)
+        if start is None:
+            if line.strip() and not line.startswith(" "):
+                break  # left the mcp_servers block without finding the entry
+            continue
+        # Entry ends at the next sibling key or any shallower line — including
+        # a top-level key that closes the mcp_servers block itself.
+        if line.strip() and not line.startswith("    "):
+            end = i
+            while end > start + 1 and not lines[end - 1].strip():
+                end -= 1  # keep blank separator lines out of the entry span
+            return (start, end)
     return (start, len(lines)) if start is not None else None
 
 
