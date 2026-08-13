@@ -37,5 +37,6 @@ chmod +x "$repo_root/dist/index.js" "$repo_root/start.sh"
 
 echo "Installed review-context-mcp into $repo_root"
 echo "Launcher: $repo_root/start.sh"
-echo "Register with:  make mcp-add   # Claude Code"
+echo "Register with:  make mcp-add    # Claude Code"
 echo "                make auggie-add # Augment CLI"
+echo "                make hermes-add # Hermes Agent"
