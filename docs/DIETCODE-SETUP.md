@@ -18,10 +18,13 @@ The code review system has these components:
 ## Prerequisites
 
 - **VS Code** with [DietCode extension](https://marketplace.visualstudio.com/items?itemName=dreambeesai.dietcode) installed
-- **Node.js** ≥ 18 (for review-context-mcp and context7)
+- **Node.js** ≥ 20 (for review-context-mcp and context7 — matches `package.json` `engines`)
 - **Python** ≥ 3.11 (for code-inference-query)
 - **Augment Code** account with API token (for semantic search)
 - **iCloud Drive** synced (or manually clone the repos — see Alternative Setup below)
+
+> This guide is DietCode-specific. For the general portable install, registration,
+> and troubleshooting workflow, see [README.md](../README.md).
 
 ## Step 1: Verify iCloud Sync
 
@@ -42,8 +45,7 @@ The `start.sh` launcher auto-installs on first run, but you can pre-install:
 
 ```bash
 cd ~/Library/Mobile\ Documents/com\~apple\~CloudDocs/review-context-mcp
-npm install --ignore-scripts
-npm run build
+make install
 ```
 
 Verify it starts:
@@ -251,13 +253,14 @@ git clone <review-context-mcp-repo-url> ~/code-review-tools/review-context-mcp
 git clone <code-inference-query-repo-url> ~/code-review-tools/code-inference-query
 
 # Install
-cd ~/code-review-tools/review-context-mcp && npm install && npm run build
+cd ~/code-review-tools/review-context-mcp && make install
 cd ~/code-review-tools/code-inference-query && pip install --user -e .
 
 # Update paths in .vscode/mcp.json to use ~/code-review-tools/ instead of iCloud path
 ```
 
-Update the `start.sh` PROJ variable or create a wrapper script that sets the correct path.
+`start.sh` resolves its own location at runtime, so no path variable needs editing — just point
+the MCP config at the new `start.sh` location.
 
 ## File Tree Summary
 

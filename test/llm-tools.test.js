@@ -36,6 +36,64 @@ test("review_normalize_plans: builds correct prompt and returns parsed JSON", as
   assert.equal(parsed[0].agent_name, "Claude");
 });
 
+test("review_normalize_plans: default prompt preserves implementation-plan fields", async () => {
+  const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
+  let capturedSystemPrompt = "";
+  const client = {
+    _initialized: true,
+    async generate(systemPrompt) {
+      capturedSystemPrompt = systemPrompt;
+      return JSON.stringify([{ agent_name: "Claude", delta: "d" }]);
+    },
+  };
+  const handler = createNormalizePlansHandler(client);
+
+  await handler({ plans: [{ agent_name: "Claude", plan_text: "plan" }] });
+
+  assert.match(capturedSystemPrompt, /Problem, Solution, Key files\/symbols/);
+});
+
+test("review_normalize_plans: preserve_fields overrides default field list", async () => {
+  const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
+  let capturedSystemPrompt = "";
+  const client = {
+    _initialized: true,
+    async generate(systemPrompt) {
+      capturedSystemPrompt = systemPrompt;
+      return JSON.stringify([{ agent_name: "Woolf", delta: "d" }]);
+    },
+  };
+  const handler = createNormalizePlansHandler(client);
+
+  await handler({
+    plans: [{ agent_name: "Woolf", plan_text: "editorial review text" }],
+    preserve_fields: ["First Impression", "What Works", "Central Question"],
+  });
+
+  assert.match(capturedSystemPrompt, /First Impression, What Works, Central Question/);
+  assert.doesNotMatch(capturedSystemPrompt, /Key files\/symbols/);
+});
+
+test("review_normalize_plans: empty preserve_fields falls back to defaults", async () => {
+  const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
+  let capturedSystemPrompt = "";
+  const client = {
+    _initialized: true,
+    async generate(systemPrompt) {
+      capturedSystemPrompt = systemPrompt;
+      return JSON.stringify([{ agent_name: "Claude", delta: "d" }]);
+    },
+  };
+  const handler = createNormalizePlansHandler(client);
+
+  await handler({
+    plans: [{ agent_name: "Claude", plan_text: "plan" }],
+    preserve_fields: [],
+  });
+
+  assert.match(capturedSystemPrompt, /Problem, Solution, Key files\/symbols/);
+});
+
 test("review_normalize_plans: returns isError on LLM failure", async () => {
   const { createNormalizePlansHandler } = await import("../dist/llm-tools.js");
   const client = {

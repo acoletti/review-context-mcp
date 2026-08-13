@@ -1,0 +1,14 @@
+{
+  "//": "Template for VS Code / Cursor / DietCode MCP config. Copy to .vscode/mcp.json and replace <repo-root>.",
+  "servers": {
+    "review-context": {
+      "type": "stdio",
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "exec \"<repo-root>/start.sh\""
+      ],
+      "env": {}
+    }
+  }
+}

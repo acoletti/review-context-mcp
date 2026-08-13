@@ -31,6 +31,9 @@ function formatAge(ms: number): string {
   return `${days}d ${hours % 24}h ago`;
 }
 
+// Tool inventory below is hand-synced with README.md's "Tool inventory"
+// table and test/mcp-stdio.test.js's EXPECTED_TOOLS list — update all
+// three together when adding, removing, or renaming a tool.
 const server = new McpServer({
   name: "review-context",
   version: "0.1.0",
@@ -672,9 +675,10 @@ server.tool(
 
 server.tool(
   "review_normalize_plans",
-  "Extract compact normalized deltas from implementation plans for the debate phase. " +
-    "Uses Augment LLM to preserve Problem, Solution, Key files/symbols, Steps, Risks, Priority. " +
-    "Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
+  "Extract compact normalized deltas from per-agent documents (implementation plans, " +
+    "editorial reviews, etc.) for the debate phase. Uses Augment LLM. By default preserves " +
+    "Problem, Solution, Key files/symbols, Steps, Risks, Priority; override with preserve_fields " +
+    "for non-code workflows. Requires AUGMENT_API_TOKEN and AUGMENT_API_URL.",
   {
     plans: z
       .array(
@@ -690,6 +694,14 @@ server.tool(
       .max(1000)
       .optional()
       .describe("Target token count per compact delta (default: 200)"),
+    preserve_fields: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Field names to preserve in each delta, overriding the implementation-plan defaults. " +
+          'Example for editorial reviews: ["First Impression", "What Works", "What Needs Work", ' +
+          '"Central Question", "Priority Ranking"]',
+      ),
     model: z
       .string()
       .optional()
@@ -865,6 +877,12 @@ server.tool(
 );
 
 // ─── Start the server ────────────────────────────────────────────────────
+// StdioServerTransport only (never StreamableHTTPServerTransport/SSE) — the
+// two known @modelcontextprotocol/sdk advisories that require an HTTP
+// listener (GHSA-w48q-cv73-mx4w DNS rebinding, GHSA-345p-7cg4-v4c7
+// cross-client leak via shared HTTP transport reuse) do not apply to this
+// server. Do not add an HTTP transport without re-auditing both advisories
+// and confirming the installed sdk version's fix status.
 
 async function main() {
   const transport = new StdioServerTransport();

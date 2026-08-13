@@ -33,21 +33,34 @@ function tryParseJson(text: string): ParseResult {
 
 const MAX_OUTPUT_TOKENS = 8192;
 
+const DEFAULT_PLAN_FIELDS = [
+  "Problem",
+  "Solution",
+  "Key files/symbols",
+  "Implementation steps",
+  "Risks/trade-offs",
+  "Priority",
+];
+
 export function createNormalizePlansHandler(llm: LlmClient) {
   return async (args: {
     plans: Array<{ agent_name: string; plan_text: string }>;
     target_tokens_per_plan?: number;
+    preserve_fields?: string[];
     model?: string;
   }) => {
     try {
       const targetTokens = args.target_tokens_per_plan ?? 200;
+      const fields =
+        args.preserve_fields && args.preserve_fields.length > 0
+          ? args.preserve_fields
+          : DEFAULT_PLAN_FIELDS;
 
       const systemPrompt =
-        "Extract a compact delta from each implementation plan. " +
-        "For each plan, preserve: Problem, Solution, Key files/symbols, " +
-        "Implementation steps, Risks/trade-offs, Priority. " +
-        "Keep specific filenames, function names, symbols, and constraint language verbatim. " +
-        `Target ~${targetTokens} tokens per plan. ` +
+        "Extract a compact delta from each document. " +
+        `For each document, preserve: ${fields.join(", ")}. ` +
+        "Keep specific filenames, function names, symbols, quoted passages, and constraint language verbatim. " +
+        `Target ~${targetTokens} tokens per document. ` +
         'Return as a JSON array of { "agent_name": "...", "delta": "..." } objects. ' +
         "Return only the JSON array, no other text.";
 

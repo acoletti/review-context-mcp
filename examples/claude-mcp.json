@@ -1,0 +1,14 @@
+{
+  "//": "Template for ~/.claude/settings.json mcpServers block. Prefer 'make mcp-add' — this manual form is only for environments where the claude CLI is unavailable. Replace <repo-root>.",
+  "mcpServers": {
+    "review-context": {
+      "type": "stdio",
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "exec \"<repo-root>/start.sh\""
+      ],
+      "env": {}
+    }
+  }
+}

@@ -2,3 +2,11 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+
+# Local MCP client configs — machine-specific; use examples/ templates instead.
+.vscode/mcp.json
+.claude/settings.json
+.claude/settings.local.json
+
+# Local Auggie/Claude hook runtime state (session-shepherd, failure-tracker).
+.augment/
