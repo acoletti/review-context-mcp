@@ -2,7 +2,8 @@
  * [LAYER: INFRASTRUCTURE]
  * Exercise scripts/mcp_add.sh, scripts/mcp_remove.sh, scripts/auggie_add.sh,
  * scripts/auggie_remove.sh against fake `claude` / `auggie` binaries that
- * record their argv. Verifies scope handling, --replace, absolute
+ * record their argv, plus scripts/hermes_add.sh against a temp Hermes
+ * config.yaml. Verifies scope handling, --replace, absolute
  * launcher path, env forwarding, redaction of secrets in user-facing
  * output, and failure propagation. Never writes to the user's real
  * config.
@@ -11,6 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile, chmod } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -182,4 +184,122 @@ test("scrub_secrets redacts output without ever invoking python3", async (t) => 
 
   assert.ok(!stdout.includes(token), "downstream CLI echo must be scrubbed of the secret");
   assert.ok(stdout.includes("***"), "scrubbed output must contain the redaction placeholder");
+});
+
+// ---------------------------------------------------------------------------
+// Hermes Agent registration (scripts/hermes_add.sh + scripts/hermes_add.py)
+//
+// Hermes has no `mcp add` CLI, so the registrar splices ~/.hermes/config.yaml
+// directly. These tests run it against throwaway configs — never the real one.
+// The registrar needs a Python that can import ruamel.yaml or yaml; resolve
+// one from the Hermes venv or PATH, and skip (not fail) when unavailable so
+// the suite still passes on machines without Hermes/PyYAML.
+// ---------------------------------------------------------------------------
+
+async function resolveRegistrarPython() {
+  const candidates = [
+    process.env.HERMES_PYTHON,
+    join(homedir(), ".hermes", "hermes-agent", "venv", "bin", "python"),
+    "python3",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      await run(candidate, ["-c", "import ruamel.yaml"], {});
+      return candidate;
+    } catch {}
+    try {
+      await run(candidate, ["-c", "import yaml"], {});
+      return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+const BASE_HERMES_CONFIG = `agent:
+  model: some-model
+mcp_servers:
+  pre-existing:
+    command: /bin/echo
+    enabled: true
+display:
+  theme: dark
+`;
+
+async function makeHermesConfig(dir, content = BASE_HERMES_CONFIG) {
+  const configPath = join(dir, "config.yaml");
+  await writeFile(configPath, content);
+  return configPath;
+}
+
+function hermesEnv(configPath, py, extras = {}) {
+  return {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: process.env.HOME ?? homedir(),
+    HERMES_CONFIG: configPath,
+    HERMES_PYTHON: py,
+    NODE_BIN: "/fake/bin/node",
+    ...extras,
+  };
+}
+
+test("hermes_add.sh registers the server with NODE_BIN pinned, preserving other entries", async (t) => {
+  const py = await resolveRegistrarPython();
+  if (!py) return t.skip("no python with a YAML library available");
+  const dir = await makeTempDir("rc-hermes-");
+  t.after(() => cleanup(dir));
+  const configPath = await makeHermesConfig(dir);
+
+  const token = "SECRET_HERMES_TOKEN_123";
+  const { stdout } = await runScript(join(REPO_ROOT, "scripts", "hermes_add.sh"), {
+    env: hermesEnv(configPath, py, { AUGMENT_API_TOKEN: token }),
+  });
+
+  const written = await readFile(configPath, "utf8");
+  assert.ok(written.includes("  review-context:"), "entry must be added under mcp_servers");
+  assert.ok(
+    written.includes(`command: ${join(REPO_ROOT, "start.sh")}`),
+    "command must be the absolute start.sh path",
+  );
+  assert.ok(written.includes('NODE_BIN: "/fake/bin/node"'), "NODE_BIN must be pinned in env");
+  assert.ok(written.includes(`AUGMENT_API_TOKEN: "${token}"`), "token must reach the config");
+  assert.ok(written.includes("pre-existing:"), "pre-existing servers must survive");
+  assert.ok(written.includes("theme: dark"), "unrelated config must survive");
+
+  assert.ok(!stdout.includes(token), "user-facing invocation log must redact the token");
+  assert.ok(stdout.includes("AUGMENT_API_TOKEN=***"), "must show redaction placeholder");
+});
+
+test("hermes_add.sh is idempotent and --remove restores the original config", async (t) => {
+  const py = await resolveRegistrarPython();
+  if (!py) return t.skip("no python with a YAML library available");
+  const dir = await makeTempDir("rc-hermes-");
+  t.after(() => cleanup(dir));
+  const configPath = await makeHermesConfig(dir);
+  const env = hermesEnv(configPath, py);
+
+  const script = join(REPO_ROOT, "scripts", "hermes_add.sh");
+  await runScript(script, { env });
+  const afterAdd = await readFile(configPath, "utf8");
+
+  const { stdout: secondAdd } = await runScript(script, { env });
+  assert.match(secondAdd, /unchanged/, "re-add must report unchanged");
+  assert.equal(await readFile(configPath, "utf8"), afterAdd, "re-add must not rewrite");
+
+  // --remove must splice the entry back out, leaving everything else intact.
+  await run(script, ["--remove"], { env, cwd: REPO_ROOT });
+  assert.equal(
+    await readFile(configPath, "utf8"),
+    BASE_HERMES_CONFIG,
+    "add+remove round-trip must be lossless",
+  );
+});
+
+test("hermes_add.sh skips cleanly when Hermes is not installed", async (t) => {
+  const dir = await makeTempDir("rc-hermes-");
+  t.after(() => cleanup(dir));
+
+  const { stdout } = await runScript(join(REPO_ROOT, "scripts", "hermes_add.sh"), {
+    env: hermesEnv(join(dir, "missing-config.yaml"), "python3"),
+  });
+  assert.match(stdout, /skipping registration/, "must skip, not fail, without Hermes");
 });
