@@ -5,7 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -1111,50 +1111,50 @@ test("listSessions handles old meta.json without boardContextCount", async (t) =
 
 // ─── Artifact blackboard tests ──────────────────────────────────────────
 
-test("storeArtifact stores and readArtifacts retrieves", () => {
+test("storeArtifact stores and readArtifacts retrieves", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
-  manager.storeArtifact(sid, "phase2/claude_plan", "plan content here");
-  const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/claude_plan"]);
+  await manager.storeArtifact(sid, "phase2/claude_plan", "plan content here");
+  const { artifacts, missing } = await manager.readArtifacts(sid, ["phase2/claude_plan"]);
 
   assert.equal(artifacts["phase2/claude_plan"], "plan content here");
   assert.equal(missing.length, 0);
 });
 
-test("readArtifacts returns null and lists missing keys", () => {
+test("readArtifacts returns null and lists missing keys", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
-  const { artifacts, missing } = manager.readArtifacts(sid, ["nonexistent/key"]);
+  const { artifacts, missing } = await manager.readArtifacts(sid, ["nonexistent/key"]);
 
   assert.equal(artifacts["nonexistent/key"], null);
   assert.deepEqual(missing, ["nonexistent/key"]);
 });
 
-test("storeArtifact overwrites existing key", () => {
+test("storeArtifact overwrites existing key", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
-  manager.storeArtifact(sid, "context/slim", "v1");
-  manager.storeArtifact(sid, "context/slim", "v2");
-  const { artifacts } = manager.readArtifacts(sid, ["context/slim"]);
+  await manager.storeArtifact(sid, "context/slim", "v1");
+  await manager.storeArtifact(sid, "context/slim", "v2");
+  const { artifacts } = await manager.readArtifacts(sid, ["context/slim"]);
 
   assert.equal(artifacts["context/slim"], "v2");
 });
 
-test("storeArtifact rejects artifact exceeding per-artifact char limit", () => {
+test("storeArtifact rejects artifact exceeding per-artifact char limit", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
   const oversized = "x".repeat(MAX_ARTIFACT_CHARS + 1);
 
-  assert.throws(
+  await assert.rejects(
     () => manager.storeArtifact(sid, "big", oversized),
     /exceeds.*character limit/,
   );
 });
 
-test("storeArtifact rejects when session total would exceed limit", () => {
+test("storeArtifact rejects when session total would exceed limit", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
@@ -1162,44 +1162,44 @@ test("storeArtifact rejects when session total would exceed limit", () => {
   const chunkSize = MAX_ARTIFACT_CHARS;
   const chunks = Math.floor(MAX_ARTIFACT_TOTAL_CHARS / chunkSize);
   for (let i = 0; i < chunks; i++) {
-    manager.storeArtifact(sid, `fill/${i}`, "x".repeat(chunkSize));
+    await manager.storeArtifact(sid, `fill/${i}`, "x".repeat(chunkSize));
   }
 
   // Next store should exceed total
-  assert.throws(
+  await assert.rejects(
     () => manager.storeArtifact(sid, "overflow", "x".repeat(chunkSize)),
     /would exceed.*artifact limit/,
   );
 });
 
-test("storeArtifact allows overwrite without double-counting size", () => {
+test("storeArtifact allows overwrite without double-counting size", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
-  manager.storeArtifact(sid, "key", "x".repeat(MAX_ARTIFACT_CHARS));
+  await manager.storeArtifact(sid, "key", "x".repeat(MAX_ARTIFACT_CHARS));
   // Overwrite with same-size value should succeed (not double-count)
-  manager.storeArtifact(sid, "key", "y".repeat(MAX_ARTIFACT_CHARS));
-  const { artifacts } = manager.readArtifacts(sid, ["key"]);
+  await manager.storeArtifact(sid, "key", "y".repeat(MAX_ARTIFACT_CHARS));
+  const { artifacts } = await manager.readArtifacts(sid, ["key"]);
 
   assert.equal(artifacts["key"].length, MAX_ARTIFACT_CHARS);
   assert.equal(artifacts["key"][0], "y");
 });
 
-test("clearArtifacts removes keys matching prefix", () => {
+test("clearArtifacts removes keys matching prefix", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
-  manager.storeArtifact(sid, "phase2/claude", "plan1");
-  manager.storeArtifact(sid, "phase2/implementer", "plan2");
-  manager.storeArtifact(sid, "context/slim", "slim ctx");
+  await manager.storeArtifact(sid, "phase2/claude", "plan1");
+  await manager.storeArtifact(sid, "phase2/implementer", "plan2");
+  await manager.storeArtifact(sid, "context/slim", "slim ctx");
 
-  const result = manager.clearArtifacts(sid, "phase2/");
+  const result = await manager.clearArtifacts(sid, "phase2/");
 
   assert.deepEqual(result.cleared.sort(), ["phase2/claude", "phase2/implementer"]);
   assert.equal(result.count, 2);
 
   // phase2 keys gone, context/slim still present
-  const { artifacts, missing } = manager.readArtifacts(sid, [
+  const { artifacts, missing } = await manager.readArtifacts(sid, [
     "phase2/claude", "phase2/implementer", "context/slim",
   ]);
   assert.equal(artifacts["phase2/claude"], null);
@@ -1208,25 +1208,25 @@ test("clearArtifacts removes keys matching prefix", () => {
   assert.equal(missing.length, 2);
 });
 
-test("clearArtifacts with exact key prefix clears single artifact", () => {
+test("clearArtifacts with exact key prefix clears single artifact", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
-  manager.storeArtifact(sid, "context/full", "full ctx");
-  manager.storeArtifact(sid, "context/slim", "slim ctx");
+  await manager.storeArtifact(sid, "context/full", "full ctx");
+  await manager.storeArtifact(sid, "context/slim", "slim ctx");
 
-  const result = manager.clearArtifacts(sid, "context/full");
+  const result = await manager.clearArtifacts(sid, "context/full");
 
   assert.equal(result.count, 1);
-  const { artifacts } = manager.readArtifacts(sid, ["context/full", "context/slim"]);
+  const { artifacts } = await manager.readArtifacts(sid, ["context/full", "context/slim"]);
   assert.equal(artifacts["context/full"], null);
   assert.equal(artifacts["context/slim"], "slim ctx");
 });
 
-test("clearArtifacts on nonexistent session returns empty", () => {
+test("clearArtifacts on nonexistent session returns empty", async () => {
   const manager = new ContextManager(false);
 
-  const result = manager.clearArtifacts("no-such-session", "phase2/");
+  const result = await manager.clearArtifacts("no-such-session", "phase2/");
   assert.equal(result.count, 0);
   assert.deepEqual(result.cleared, []);
 });
@@ -1235,11 +1235,11 @@ test("clear() drops the in-memory artifact cache but not the on-disk blackboard"
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
   try {
-    manager.storeArtifact(sid, "phase2/plan", "some plan");
+    await manager.storeArtifact(sid, "phase2/plan", "some plan");
     await manager.clear();
     assert.equal(manager.artifactStore.size, 0, "memory cache is reset");
 
-    const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/plan"]);
+    const { artifacts, missing } = await manager.readArtifacts(sid, ["phase2/plan"]);
     assert.equal(artifacts["phase2/plan"], "some plan", "reloaded from disk");
     assert.deepEqual(missing, []);
   } finally {
@@ -1247,13 +1247,13 @@ test("clear() drops the in-memory artifact cache but not the on-disk blackboard"
   }
 });
 
-test("storeArtifact preserves metadata", () => {
+test("storeArtifact preserves metadata", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
 
-  manager.storeArtifact(sid, "phase2/claude", "plan", { phase: 2, agent_name: "claude", token_estimate: 500 });
+  await manager.storeArtifact(sid, "phase2/claude", "plan", { phase: 2, agent_name: "claude", token_estimate: 500 });
   // Metadata is stored internally — verify via readArtifacts that value is intact
-  const { artifacts } = manager.readArtifacts(sid, ["phase2/claude"]);
+  const { artifacts } = await manager.readArtifacts(sid, ["phase2/claude"]);
   assert.equal(artifacts["phase2/claude"], "plan");
 });
 
@@ -1269,18 +1269,20 @@ test("artifacts survive a workspace_root change in ensureContext", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
   try {
-    manager.storeArtifact(sid, "phase2/findings", "finding A");
+    await manager.storeArtifact(sid, "phase2/findings", "finding A");
 
     // Simulate an existing context bound to workspace /a, then ask for /b.
     manager.ctx = { clearIndex: async () => undefined };
     manager.workspaceRoot = resolve("/tmp/pkr-ws-a");
+    manager.sessionId = "old-session";
     try {
       await manager.ensureContext("/tmp/pkr-ws-b");
     } catch {
       // DirectContext.create may fail offline — teardown already ran, which is what we test.
     }
+    assert.equal(manager.sessionId, null, "workspace-change teardown ran");
 
-    const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/findings"]);
+    const { artifacts, missing } = await manager.readArtifacts(sid, ["phase2/findings"]);
     assert.equal(artifacts["phase2/findings"], "finding A");
     assert.equal(missing.length, 0);
   } finally {
@@ -1292,10 +1294,10 @@ test("artifacts are readable from a fresh ContextManager instance (disk-backed)"
   const writer = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
   try {
-    writer.storeArtifact(sid, "phase3/synthesis", "durable content", { agent_name: "claude" });
+    await writer.storeArtifact(sid, "phase3/synthesis", "durable content", { agent_name: "claude" });
 
     const reader = new ContextManager(false);
-    const { artifacts, missing } = reader.readArtifacts(sid, ["phase3/synthesis"]);
+    const { artifacts, missing } = await reader.readArtifacts(sid, ["phase3/synthesis"]);
     assert.equal(artifacts["phase3/synthesis"], "durable content");
     assert.equal(missing.length, 0);
   } finally {
@@ -1307,9 +1309,9 @@ test("artifacts survive review_clear", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
   try {
-    manager.storeArtifact(sid, "k", "v");
+    await manager.storeArtifact(sid, "k", "v");
     await manager.clear();
-    const { artifacts } = manager.readArtifacts(sid, ["k"]);
+    const { artifacts } = await manager.readArtifacts(sid, ["k"]);
     assert.equal(artifacts["k"], "v");
   } finally {
     await cleanupArtifactFile(sid);
@@ -1320,12 +1322,12 @@ test("clearArtifacts removes keys from disk too", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
   try {
-    manager.storeArtifact(sid, "a/1", "x");
-    manager.storeArtifact(sid, "b/1", "y");
-    manager.clearArtifacts(sid, "a/");
+    await manager.storeArtifact(sid, "a/1", "x");
+    await manager.storeArtifact(sid, "b/1", "y");
+    await manager.clearArtifacts(sid, "a/");
 
     const reader = new ContextManager(false);
-    const { artifacts, missing } = reader.readArtifacts(sid, ["a/1", "b/1"]);
+    const { artifacts, missing } = await reader.readArtifacts(sid, ["a/1", "b/1"]);
     assert.equal(artifacts["a/1"], null);
     assert.equal(artifacts["b/1"], "y");
     assert.deepEqual(missing, ["a/1"]);
@@ -1338,14 +1340,81 @@ test("deleteSession removes the session's artifact file", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
   try {
-    manager.storeArtifact(sid, "k", "v");
+    await manager.storeArtifact(sid, "k", "v");
     assert.ok(existsSync(join(ARTIFACTS_DIR, `${sid}.json`)));
     await manager.deleteSession(sid);
     assert.equal(existsSync(join(ARTIFACTS_DIR, `${sid}.json`)), false);
+    assert.equal(((await manager.readArtifacts(sid, ["k"]))).artifacts["k"], null, "in-memory bucket dropped too");
     const reader = new ContextManager(false);
-    assert.equal(reader.readArtifacts(sid, ["k"]).artifacts["k"], null);
+    assert.equal((await reader.readArtifacts(sid, ["k"])).artifacts["k"], null);
   } finally {
     await cleanupArtifactFile(sid);
+  }
+});
+
+test("a corrupt artifact file is ignored instead of bricking the session", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  try {
+    await mkdir(ARTIFACTS_DIR, { recursive: true });
+    writeFileSync(join(ARTIFACTS_DIR, `${sid}.json`), "{not json");
+    const { artifacts, missing } = await manager.readArtifacts(sid, ["k"]);
+    assert.equal(artifacts["k"], null);
+    assert.deepEqual(missing, ["k"]);
+    // clearArtifacts must still work so the bad file can be replaced
+    await manager.storeArtifact(sid, "k", "fresh");
+    const reader = new ContextManager(false);
+    assert.equal(((await reader.readArtifacts(sid, ["k"]))).artifacts["k"], "fresh");
+  } finally {
+    await cleanupArtifactFile(sid);
+  }
+});
+
+test("resumeSession does not let a stale cache.json snapshot shadow the durable artifact file", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  const statePath = join(CACHE_DIR, `${sid}.state.json`);
+  const metaPath = join(CACHE_DIR, `${sid}.meta.json`);
+  const cachePath = join(CACHE_DIR, `${sid}.cache.json`);
+  try {
+    // Legacy-shaped session files with an embedded (stale) artifact snapshot.
+    writeFileSync(statePath, "{}");
+    writeFileSync(metaPath, JSON.stringify({ createdAt: Date.now(), indexedPaths: [], workspaceRoot: "" }));
+    writeFileSync(cachePath, JSON.stringify({
+      searchResults: [], boardContexts: [],
+      artifacts: [["k", { value: "stale", storedAt: 1 }]],
+    }));
+    // Durable store has the newer value.
+    await manager.storeArtifact(sid, "k", "fresh");
+
+    await manager.resumeSession(sid);
+    assert.equal(((await manager.readArtifacts(sid, ["k"]))).artifacts["k"], "fresh");
+  } finally {
+    await cleanupArtifactFile(sid);
+    await Promise.all([statePath, metaPath, cachePath].map((f) => rm(f, { force: true })));
+  }
+});
+
+test("resumeSession migrates a legacy embedded snapshot when no durable file exists", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  const statePath = join(CACHE_DIR, `${sid}.state.json`);
+  const metaPath = join(CACHE_DIR, `${sid}.meta.json`);
+  const cachePath = join(CACHE_DIR, `${sid}.cache.json`);
+  try {
+    writeFileSync(statePath, "{}");
+    writeFileSync(metaPath, JSON.stringify({ createdAt: Date.now(), indexedPaths: [], workspaceRoot: "" }));
+    writeFileSync(cachePath, JSON.stringify({
+      searchResults: [], boardContexts: [],
+      artifacts: [["k", { value: "legacy", storedAt: 1 }]],
+    }));
+    await manager.resumeSession(sid);
+    assert.ok(existsSync(join(ARTIFACTS_DIR, `${sid}.json`)), "migrated to durable file");
+    const reader = new ContextManager(false);
+    assert.equal(((await reader.readArtifacts(sid, ["k"]))).artifacts["k"], "legacy");
+  } finally {
+    await cleanupArtifactFile(sid);
+    await Promise.all([statePath, metaPath, cachePath].map((f) => rm(f, { force: true })));
   }
 });
 
