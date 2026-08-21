@@ -1,0 +1,25 @@
+# Scout per-repo config template.
+#
+# Seeded into `<repo>/.scout/scout.config.yaml` by `scout attach` when the
+# repo has no config yet.  Templates here only carry the repo-specific
+# ignore / dampen / boost / tune overrides; defaults for
+# repository/markdown/ranking/index/projects are filled in at load time.
+ignore:
+  # --- derived from .gitignore at attach; edit or remove freely (not regenerated) ---
+  - 'node_modules/'
+  - 'dist/'
+  - '*.tsbuildinfo'
+  - '.DS_Store'
+  - '.vscode/mcp.json'
+  - '.claude/settings.json'
+  - '.claude/settings.local.json'
+  - '.augment/'
+  - '**/CHANGELOG.md'
+  - '**/CHANGELOG*'
+  - '**/CHANGES.md'
+  - '**/HISTORY.md'
+
+dampen:
+  - factor: 0.3
+    patterns:
+      - '**/package.json'
