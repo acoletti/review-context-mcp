@@ -4,7 +4,7 @@
 import { DirectContext, type File, type IndexingResult } from "@augmentcode/auggie-sdk";
 import { execFile } from "child_process";
 import { readFile, writeFile, rename, unlink, stat, readdir, mkdir } from "fs/promises";
-import { mkdirSync, readFileSync, statSync } from "fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync, renameSync, unlinkSync } from "fs";
 import { join, resolve, relative } from "path";
 import { createHash } from "crypto";
 import { homedir } from "os";
@@ -18,6 +18,9 @@ const CACHE_DIR = join(
   "review-cache",
 );
 const RESEARCH_DIR = join(CACHE_DIR, "research");
+// Per-session blackboard files: written on every store/clear so artifacts survive
+// workspace changes, review_clear, and daemon restarts (the research store does the same).
+const ARTIFACTS_DIR = join(CACHE_DIR, "artifacts");
 
 const MAX_FILE_SIZE_BYTES = 1_000_000; // 1MB — SDK limit
 const MAX_CACHE_ENTRIES = 500; // FIFO eviction — oldest entry by insertion order
@@ -841,7 +844,9 @@ export class ContextManager {
       this.indexingComplete = false;
       this.resultCache.clear();
       this.boardContextCache.clear();
-      this.artifactStore.clear();
+      // artifactStore is deliberately NOT cleared: the blackboard is session-scoped,
+      // not workspace-scoped, and personas indexing different roots must not wipe
+      // each other's findings.
     }
 
     this.ctx = await DirectContext.create({
@@ -1380,6 +1385,7 @@ export class ContextManager {
       this.sessionPath(sessionId),
       this.sessionMetaPath(sessionId),
       this.sessionCachePath(sessionId),
+      this.artifactFilePath(sessionId),
     ]) {
       try {
         await unlink(filePath);
@@ -1429,6 +1435,46 @@ export class ContextManager {
 
   // ─── Artifact blackboard ─────────────────────────────────────────────
 
+  private artifactFilePath(sessionId: string): string {
+    return join(ARTIFACTS_DIR, `${encodeURIComponent(sessionId)}.json`);
+  }
+
+  /** Atomically write a session's bucket to disk; remove the file when empty. */
+  private persistArtifacts(sessionId: string): void {
+    const bucket = this.artifactStore.get(sessionId);
+    const filePath = this.artifactFilePath(sessionId);
+    if (!bucket || bucket.size === 0) {
+      try { unlinkSync(filePath); } catch (err) { if (!isEnoent(err)) throw err; }
+      return;
+    }
+    mkdirSync(ARTIFACTS_DIR, { recursive: true });
+    const tmp = `${filePath}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(Array.from(bucket.entries())));
+      renameSync(tmp, filePath);
+    } catch (err) {
+      try { unlinkSync(tmp); } catch { /* best effort */ }
+      throw err;
+    }
+  }
+
+  /** Return the in-memory bucket, lazily restoring it from disk on a miss. */
+  private loadArtifactBucket(sessionId: string): Map<string, ArtifactEntry> | undefined {
+    const cached = this.artifactStore.get(sessionId);
+    if (cached) return cached;
+    let raw: string;
+    try {
+      raw = readFileSync(this.artifactFilePath(sessionId), "utf-8");
+    } catch (err) {
+      if (isEnoent(err)) return undefined;
+      this.log(`Warning: failed to read artifacts for ${sessionId}: ${toErrorMessage(err)}`);
+      return undefined;
+    }
+    const bucket = new Map<string, ArtifactEntry>(JSON.parse(raw) as Array<[string, ArtifactEntry]>);
+    this.artifactStore.set(sessionId, bucket);
+    return bucket;
+  }
+
   private sessionTotalChars(sessionId: string): number {
     const bucket = this.artifactStore.get(sessionId);
     if (!bucket) return 0;
@@ -1449,7 +1495,7 @@ export class ContextManager {
       );
     }
 
-    let bucket = this.artifactStore.get(sessionId);
+    let bucket = this.loadArtifactBucket(sessionId);
     if (!bucket) {
       bucket = new Map();
       this.artifactStore.set(sessionId, bucket);
@@ -1465,6 +1511,7 @@ export class ContextManager {
     }
 
     bucket.set(key, { value, metadata, storedAt: Date.now() });
+    this.persistArtifacts(sessionId);
     this.log(`Artifact stored: ${sessionId}/${key} (${value.length} chars)`);
     return { stored: true, key, chars: value.length };
   }
@@ -1473,8 +1520,7 @@ export class ContextManager {
     sessionId: string,
     keys: string[],
   ): { artifacts: Record<string, string | null>; missing: string[] } {
-    const bucket = this.artifactStore.get(sessionId);
-    this.log(`DEBUG readArtifacts: sid=${sessionId}, bucket=${bucket ? 'found('+bucket.size+')' : 'null'}, storeKeys=${Array.from(this.artifactStore.keys()).join('|')}`);
+    const bucket = this.loadArtifactBucket(sessionId);
     const artifacts: Record<string, string | null> = {};
     const missing: string[] = [];
 
@@ -1496,7 +1542,7 @@ export class ContextManager {
     sessionId: string,
     prefix: string,
   ): { cleared: string[]; count: number } {
-    const bucket = this.artifactStore.get(sessionId);
+    const bucket = this.loadArtifactBucket(sessionId);
     if (!bucket) return { cleared: [], count: 0 };
 
     const cleared: string[] = [];
@@ -1510,6 +1556,7 @@ export class ContextManager {
     if (bucket.size === 0) {
       this.artifactStore.delete(sessionId);
     }
+    this.persistArtifacts(sessionId);
 
     this.log(`Artifacts cleared: ${cleared.length} keys matching "${prefix}"`);
     return { cleared, count: cleared.length };

@@ -1231,16 +1231,20 @@ test("clearArtifacts on nonexistent session returns empty", () => {
   assert.deepEqual(result.cleared, []);
 });
 
-test("clear() wipes artifact store", async () => {
+test("clear() drops the in-memory artifact cache but not the on-disk blackboard", async () => {
   const manager = new ContextManager(false);
   const sid = `test-${randomUUID()}`;
+  try {
+    manager.storeArtifact(sid, "phase2/plan", "some plan");
+    await manager.clear();
+    assert.equal(manager.artifactStore.size, 0, "memory cache is reset");
 
-  manager.storeArtifact(sid, "phase2/plan", "some plan");
-  await manager.clear();
-
-  const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/plan"]);
-  assert.equal(artifacts["phase2/plan"], null);
-  assert.deepEqual(missing, ["phase2/plan"]);
+    const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/plan"]);
+    assert.equal(artifacts["phase2/plan"], "some plan", "reloaded from disk");
+    assert.deepEqual(missing, []);
+  } finally {
+    await rm(join(CACHE_DIR, "artifacts", `${sid}.json`), { force: true });
+  }
 });
 
 test("storeArtifact preserves metadata", () => {
@@ -1251,4 +1255,105 @@ test("storeArtifact preserves metadata", () => {
   // Metadata is stored internally — verify via readArtifacts that value is intact
   const { artifacts } = manager.readArtifacts(sid, ["phase2/claude"]);
   assert.equal(artifacts["phase2/claude"], "plan");
+});
+
+// ─── Artifact durability (feature/durable-blackboard) ──────────────────
+
+const ARTIFACTS_DIR = join(CACHE_DIR, "artifacts");
+
+async function cleanupArtifactFile(sid) {
+  await rm(join(ARTIFACTS_DIR, `${sid}.json`), { force: true });
+}
+
+test("artifacts survive a workspace_root change in ensureContext", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  try {
+    manager.storeArtifact(sid, "phase2/findings", "finding A");
+
+    // Simulate an existing context bound to workspace /a, then ask for /b.
+    manager.ctx = { clearIndex: async () => undefined };
+    manager.workspaceRoot = resolve("/tmp/pkr-ws-a");
+    try {
+      await manager.ensureContext("/tmp/pkr-ws-b");
+    } catch {
+      // DirectContext.create may fail offline — teardown already ran, which is what we test.
+    }
+
+    const { artifacts, missing } = manager.readArtifacts(sid, ["phase2/findings"]);
+    assert.equal(artifacts["phase2/findings"], "finding A");
+    assert.equal(missing.length, 0);
+  } finally {
+    await cleanupArtifactFile(sid);
+  }
+});
+
+test("artifacts are readable from a fresh ContextManager instance (disk-backed)", async () => {
+  const writer = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  try {
+    writer.storeArtifact(sid, "phase3/synthesis", "durable content", { agent_name: "claude" });
+
+    const reader = new ContextManager(false);
+    const { artifacts, missing } = reader.readArtifacts(sid, ["phase3/synthesis"]);
+    assert.equal(artifacts["phase3/synthesis"], "durable content");
+    assert.equal(missing.length, 0);
+  } finally {
+    await cleanupArtifactFile(sid);
+  }
+});
+
+test("artifacts survive review_clear", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  try {
+    manager.storeArtifact(sid, "k", "v");
+    await manager.clear();
+    const { artifacts } = manager.readArtifacts(sid, ["k"]);
+    assert.equal(artifacts["k"], "v");
+  } finally {
+    await cleanupArtifactFile(sid);
+  }
+});
+
+test("clearArtifacts removes keys from disk too", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  try {
+    manager.storeArtifact(sid, "a/1", "x");
+    manager.storeArtifact(sid, "b/1", "y");
+    manager.clearArtifacts(sid, "a/");
+
+    const reader = new ContextManager(false);
+    const { artifacts, missing } = reader.readArtifacts(sid, ["a/1", "b/1"]);
+    assert.equal(artifacts["a/1"], null);
+    assert.equal(artifacts["b/1"], "y");
+    assert.deepEqual(missing, ["a/1"]);
+  } finally {
+    await cleanupArtifactFile(sid);
+  }
+});
+
+test("deleteSession removes the session's artifact file", async () => {
+  const manager = new ContextManager(false);
+  const sid = `test-${randomUUID()}`;
+  try {
+    manager.storeArtifact(sid, "k", "v");
+    assert.ok(existsSync(join(ARTIFACTS_DIR, `${sid}.json`)));
+    await manager.deleteSession(sid);
+    assert.equal(existsSync(join(ARTIFACTS_DIR, `${sid}.json`)), false);
+    const reader = new ContextManager(false);
+    assert.equal(reader.readArtifacts(sid, ["k"]).artifacts["k"], null);
+  } finally {
+    await cleanupArtifactFile(sid);
+  }
+});
+
+test.after(async () => {
+  // Blackboard tests above use random `test-*` session ids; sweep their files.
+  const { readdir } = await import("node:fs/promises");
+  const files = await readdir(ARTIFACTS_DIR).catch(() => []);
+  await Promise.all(
+    files.filter((f) => f.startsWith("test-")).map((f) => rm(join(ARTIFACTS_DIR, f), { force: true })),
+  );
 });
