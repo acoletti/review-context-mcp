@@ -592,7 +592,7 @@ server.tool(
 server.tool(
   "review_store_artifact",
   "Store a named artifact in the blackboard for inter-phase transport within a review run. " +
-    "Artifacts are keyed by (session_id, artifact_key) and held in memory. " +
+    "Artifacts are keyed by (session_id, artifact_key) and persisted to disk on every write, so they survive workspace changes, review_clear, and server restarts. " +
     "Max 100K chars per artifact, 500K total per session.",
   {
     session_id: z.string().describe("Session ID for artifact scoping"),
@@ -611,7 +611,7 @@ server.tool(
   },
   async ({ session_id, artifact_key, artifact_value, metadata }) => {
     try {
-      const result = manager.storeArtifact(session_id, artifact_key, artifact_value, metadata ?? undefined);
+      const result = await manager.storeArtifact(session_id, artifact_key, artifact_value, metadata ?? undefined);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
@@ -636,7 +636,7 @@ server.tool(
   },
   async ({ session_id, artifact_keys }) => {
     try {
-      const result = manager.readArtifacts(session_id, artifact_keys);
+      const result = await manager.readArtifacts(session_id, artifact_keys);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };
@@ -660,7 +660,7 @@ server.tool(
   },
   async ({ session_id, prefix }) => {
     try {
-      const result = manager.clearArtifacts(session_id, prefix);
+      const result = await manager.clearArtifacts(session_id, prefix);
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
       };

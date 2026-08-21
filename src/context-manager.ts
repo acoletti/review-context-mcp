@@ -18,6 +18,9 @@ const CACHE_DIR = join(
   "review-cache",
 );
 const RESEARCH_DIR = join(CACHE_DIR, "research");
+// Per-session blackboard files: written on every store/clear so artifacts survive
+// workspace changes, review_clear, and daemon restarts (the research store does the same).
+const ARTIFACTS_DIR = join(CACHE_DIR, "artifacts");
 
 const MAX_FILE_SIZE_BYTES = 1_000_000; // 1MB — SDK limit
 const MAX_CACHE_ENTRIES = 500; // FIFO eviction — oldest entry by insertion order
@@ -841,7 +844,9 @@ export class ContextManager {
       this.indexingComplete = false;
       this.resultCache.clear();
       this.boardContextCache.clear();
-      this.artifactStore.clear();
+      // artifactStore is deliberately NOT cleared: the blackboard is session-scoped,
+      // not workspace-scoped, and personas indexing different roots must not wipe
+      // each other's findings.
     }
 
     this.ctx = await DirectContext.create({
@@ -1211,14 +1216,12 @@ export class ContextManager {
     // Atomic writes: temp file + rename
     const metaTmp = `${metaPath}.tmp`;
     const cacheTmp = `${cachePath}.tmp`;
-    // Include this session's blackboard artifacts in the persisted cache so they
-    // survive MCP daemon restarts (previously they were in-memory only and lost
-    // when the server stopped). Restored in resumeSession.
-    const sessionArtifacts = this.artifactStore.get(id);
+    // Blackboard artifacts are NOT embedded here: artifacts/<id>.json (written on
+    // every store) is the single source of truth. Legacy cache files that still
+    // carry an `artifacts` array are migrated once in resumeSession.
     const persistedCaches: PersistedCaches = {
       searchResults: Array.from(this.resultCache.entries()),
       boardContexts: Array.from(this.boardContextCache.entries()),
-      artifacts: sessionArtifacts ? Array.from(sessionArtifacts.entries()) : [],
     };
 
     await writeFile(metaTmp, JSON.stringify(meta, null, 2));
@@ -1241,13 +1244,13 @@ export class ContextManager {
    * Resume a previously saved session.
    * Gracefully handles missing or corrupt meta/cache files.
    */
-  resumeSession(sessionId: string): {
+  async resumeSession(sessionId: string): Promise<{
     indexedFiles: number;
     cachedResults: number;
     boardContextCount: number;
     sessionAge: number;
     workspaceRoot: string;
-    } {
+    }> {
     const statePath = this.sessionPath(sessionId);
     const metaPath = this.sessionMetaPath(sessionId);
     const cachePath = this.sessionCachePath(sessionId);
@@ -1305,16 +1308,15 @@ export class ContextManager {
         this.boardContextCache.set(key, value);
         }
 
-       // Restore blackboard artifacts
+      // Legacy migration: older cache files embedded the blackboard. Adopt that
+      // snapshot only when no durable artifacts/<id>.json exists yet — the
+      // per-write file is always fresher than a save-time snapshot.
       const artifactEntries = !Array.isArray(parsed) && Array.isArray(parsed.artifacts)
          ? parsed.artifacts
          : [];
-      if (artifactEntries.length > 0) {
-        const bucket = new Map<string, ArtifactEntry>();
-        for (const [key, value] of artifactEntries) {
-          bucket.set(key, value);
-          }
-        this.artifactStore.set(sessionId, bucket);
+      if (artifactEntries.length > 0 && !(await this.artifactFileExists(sessionId))) {
+        this.artifactStore.set(sessionId, new Map<string, ArtifactEntry>(artifactEntries));
+        await this.persistArtifacts(sessionId);
         }
       } catch {
       this.log(`Missing or corrupt cache file for session ${sessionId}, starting with empty cache`);
@@ -1375,11 +1377,13 @@ export class ContextManager {
 
   async deleteSession(sessionId: string): Promise<boolean> {
     let deleted = false;
+    this.artifactStore.delete(sessionId);
 
     for (const filePath of [
       this.sessionPath(sessionId),
       this.sessionMetaPath(sessionId),
       this.sessionCachePath(sessionId),
+      this.artifactFilePath(sessionId),
     ]) {
       try {
         await unlink(filePath);
@@ -1429,6 +1433,69 @@ export class ContextManager {
 
   // ─── Artifact blackboard ─────────────────────────────────────────────
 
+  private artifactFilePath(sessionId: string): string {
+    return join(ARTIFACTS_DIR, `${encodeURIComponent(sessionId)}.json`);
+  }
+
+  private async artifactFileExists(sessionId: string): Promise<boolean> {
+    try {
+      await stat(this.artifactFilePath(sessionId));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Atomically write a session's bucket to disk; remove the file when empty. */
+  private async persistArtifacts(sessionId: string): Promise<void> {
+    const bucket = this.artifactStore.get(sessionId);
+    const filePath = this.artifactFilePath(sessionId);
+    if (!bucket || bucket.size === 0) {
+      try { await unlink(filePath); } catch (err) { if (!isEnoent(err)) throw err; }
+      return;
+    }
+    await mkdir(ARTIFACTS_DIR, { recursive: true });
+    // Per-process staging name so two servers sharing a session_id cannot clobber
+    // each other's temp file mid-write.
+    const tmp = `${filePath}.${process.pid}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify(Array.from(bucket.entries())));
+      await rename(tmp, filePath);
+    } catch (err) {
+      await unlink(tmp).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private parseArtifactEntries(raw: string): Array<[string, ArtifactEntry]> {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("artifact file is not an entry array");
+    return parsed.filter(
+      (entry): entry is [string, ArtifactEntry] =>
+        Array.isArray(entry) &&
+        entry.length === 2 &&
+        typeof entry[0] === "string" &&
+        typeof (entry[1] as ArtifactEntry | undefined)?.value === "string",
+    );
+  }
+
+  /** Return the in-memory bucket, lazily restoring it from disk on a miss. */
+  private async loadArtifactBucket(sessionId: string): Promise<Map<string, ArtifactEntry> | undefined> {
+    const cached = this.artifactStore.get(sessionId);
+    if (cached) return cached;
+    let entries: Array<[string, ArtifactEntry]>;
+    try {
+      entries = this.parseArtifactEntries(await readFile(this.artifactFilePath(sessionId), "utf-8"));
+    } catch (err) {
+      if (isEnoent(err)) return undefined;
+      this.log(`Warning: ignoring unreadable/corrupt artifacts for ${sessionId}: ${toErrorMessage(err)}`);
+      return undefined;
+    }
+    const bucket = new Map<string, ArtifactEntry>(entries);
+    this.artifactStore.set(sessionId, bucket);
+    return bucket;
+  }
+
   private sessionTotalChars(sessionId: string): number {
     const bucket = this.artifactStore.get(sessionId);
     if (!bucket) return 0;
@@ -1437,19 +1504,19 @@ export class ContextManager {
     return total;
   }
 
-  storeArtifact(
+  async storeArtifact(
     sessionId: string,
     key: string,
     value: string,
     metadata?: ArtifactEntry["metadata"],
-  ): { stored: true; key: string; chars: number } {
+  ): Promise<{ stored: true; key: string; chars: number }> {
     if (value.length > MAX_ARTIFACT_CHARS) {
       throw new Error(
         `Artifact "${key}" exceeds ${MAX_ARTIFACT_CHARS} character limit (${value.length} chars)`,
       );
     }
 
-    let bucket = this.artifactStore.get(sessionId);
+    let bucket = await this.loadArtifactBucket(sessionId);
     if (!bucket) {
       bucket = new Map();
       this.artifactStore.set(sessionId, bucket);
@@ -1465,16 +1532,16 @@ export class ContextManager {
     }
 
     bucket.set(key, { value, metadata, storedAt: Date.now() });
+    await this.persistArtifacts(sessionId);
     this.log(`Artifact stored: ${sessionId}/${key} (${value.length} chars)`);
     return { stored: true, key, chars: value.length };
   }
 
-  readArtifacts(
+  async readArtifacts(
     sessionId: string,
     keys: string[],
-  ): { artifacts: Record<string, string | null>; missing: string[] } {
-    const bucket = this.artifactStore.get(sessionId);
-    this.log(`DEBUG readArtifacts: sid=${sessionId}, bucket=${bucket ? 'found('+bucket.size+')' : 'null'}, storeKeys=${Array.from(this.artifactStore.keys()).join('|')}`);
+  ): Promise<{ artifacts: Record<string, string | null>; missing: string[] }> {
+    const bucket = await this.loadArtifactBucket(sessionId);
     const artifacts: Record<string, string | null> = {};
     const missing: string[] = [];
 
@@ -1492,11 +1559,11 @@ export class ContextManager {
     return { artifacts, missing };
   }
 
-  clearArtifacts(
+  async clearArtifacts(
     sessionId: string,
     prefix: string,
-  ): { cleared: string[]; count: number } {
-    const bucket = this.artifactStore.get(sessionId);
+  ): Promise<{ cleared: string[]; count: number }> {
+    const bucket = await this.loadArtifactBucket(sessionId);
     if (!bucket) return { cleared: [], count: 0 };
 
     const cleared: string[] = [];
@@ -1510,6 +1577,7 @@ export class ContextManager {
     if (bucket.size === 0) {
       this.artifactStore.delete(sessionId);
     }
+    await this.persistArtifacts(sessionId);
 
     this.log(`Artifacts cleared: ${cleared.length} keys matching "${prefix}"`);
     return { cleared, count: cleared.length };
