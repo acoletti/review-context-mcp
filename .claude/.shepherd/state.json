@@ -1,0 +1,50 @@
+{
+  "schema_version": "1",
+  "sessions": {
+    "224e5aca-107b-446e-8012-818dbc8a6be6": {
+      "aborted": false,
+      "created_at": 1787268723.735968,
+      "dirty": false,
+      "last_prompt_hash": null,
+      "last_save_ts": null,
+      "last_saved_phase": null,
+      "last_sid": null,
+      "nudge_count": 0,
+      "phase_history": [],
+      "phase_observed": false,
+      "resume_required": false,
+      "review_session_id": null,
+      "updated_at": 1787268723.735968
+    },
+    "d926f760-9f48-4941-aafa-a117f8fc9f06": {
+      "aborted": false,
+      "created_at": 1787266848.911857,
+      "dirty": false,
+      "last_prompt_hash": null,
+      "last_save_ts": null,
+      "last_saved_phase": null,
+      "last_sid": null,
+      "nudge_count": 0,
+      "phase_history": [],
+      "phase_observed": false,
+      "resume_required": false,
+      "review_session_id": null,
+      "updated_at": 1787266848.911857
+    },
+    "f6d946ea-e953-42bd-8c46-04732878bf58": {
+      "aborted": false,
+      "created_at": 1787266830.267715,
+      "dirty": false,
+      "last_prompt_hash": null,
+      "last_save_ts": null,
+      "last_saved_phase": null,
+      "last_sid": null,
+      "nudge_count": 0,
+      "phase_history": [],
+      "phase_observed": false,
+      "resume_required": false,
+      "review_session_id": null,
+      "updated_at": 1787266830.267715
+    }
+  }
+}

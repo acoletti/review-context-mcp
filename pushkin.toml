@@ -1,0 +1,56 @@
+# Pushkin manifest — review-context-mcp
+version = 1
+# R1: workspace-wide schema epoch. Increment in the same PR as any
+# epoch-sensitive change (schemas/**, contract sources, [[contracts]],
+# src/**). Decreases always fail.
+schema_epoch = 1
+canonical = "json-schema-2020-12"
+authoring = "zod"
+
+# No domain contracts — this is an MCP infrastructure server.
+# Contracts section added when the project adds schema-bound features.
+
+[gates]
+# F7 enforcement: no suppression comments in the TypeScript source.
+suppression_comments = "deny"
+
+# Protected paths: config templates and registration scripts.
+# Changes require a charter amendment, not just a good reason.
+protected_paths = [
+  "pushkin.toml",
+  "AGENT-INSTRUCTIONS.md",
+  "package.json",
+  "Makefile",
+  "start.sh",
+  "scripts/**/*.sh",
+  "scripts/**/*.py",
+  "examples/**",
+  ".vscode/**",
+]
+
+# Read-only paths: test files are agent-editable only in the test-first cycle.
+read_only_paths = []
+
+# Augment retrieval for the retrieval_paths gate below.
+retrieval_tool = "mcp__codebase_retrieval__codebase_retrieval"
+
+# Scope retrieval to Rust sources (pushkin itself) when querying for context.
+retrieval_paths = ["crates/**/*.rs"]
+
+# The declared mechanical floor (spec §8.2 stage 5).
+# Order is DECLARED — nothing executes differently per scope.
+[floor]
+
+[[floor.commands]]
+name = "build"
+run = ["npm", "run", "build"]
+scope = "whole_repo"
+inputs = "toolchain"
+on_stop = true
+
+[[floor.commands]]
+name = "test"
+run = ["npm", "test"]
+scope = "whole_repo"
+inputs = "repo"
+on_stop = true
