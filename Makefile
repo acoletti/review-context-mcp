@@ -1,6 +1,7 @@
 .PHONY: install build test test-focused smoke \
         mcp-add mcp-remove mcp-list \
         auggie-add auggie-remove auggie-list \
+        codex-add codex-remove \
         hermes-add hermes-remove \
         clean
 
@@ -36,6 +37,17 @@ auggie-remove:
 
 auggie-list:
 	auggie mcp list
+
+## Register with the Codex CLI via `codex mcp add`. Codex reads stdio MCP
+## servers from ~/.codex/config.toml, so this mirrors the Claude/Auggie
+## targets. `mcp add` without a scope flag installs a *global* server (the
+## default), so one registration works across every project. Skips cleanly
+## when the Codex CLI is absent. Restart Codex to pick it up.
+codex-add:
+	./scripts/codex_add.sh
+
+codex-remove:
+	./scripts/codex_remove.sh
 
 ## Hermes Agent registration. Hermes has no `mcp add` CLI, so this edits
 ## ~/.hermes/config.yaml directly (backed up, atomic, verified). Skips

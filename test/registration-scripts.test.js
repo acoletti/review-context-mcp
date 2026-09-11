@@ -187,6 +187,69 @@ test("scrub_secrets redacts output without ever invoking python3", async (t) => 
 });
 
 // ---------------------------------------------------------------------------
+// Codex CLI registration (scripts/codex_add.sh / codex_remove.sh)
+//
+// Codex reads stdio MCP servers from ~/.codex/config.toml. `mcp add` without a
+// scope flag installs a *global* server, so these tests assert a bare
+// `mcp add review-context` argv (no scope flag), `--env`-style forwarding
+// (not `-e`), the absolute launcher path, and redaction of secrets in the
+// printed command line. The fake `codex` binary records argv like claude/auggie.
+// ---------------------------------------------------------------------------
+
+test("codex_add.sh installs a global server with --env forwarding and redaction", async (t) => {
+  const bin = await makeTempDir("rc-fakebin-");
+  const home = await makeTempHome();
+  t.after(() => cleanup(bin, home));
+
+  const argvLog = join(bin, "argv.txt");
+  await installFakeCli(bin, "codex", argvLog);
+
+  const token = "SECRET_TOKEN_CX000";
+  const { stdout } = await runScript(join(REPO_ROOT, "scripts", "codex_add.sh"), {
+    env: {
+      PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      HOME: home,
+      AUGMENT_API_TOKEN: token,
+    },
+  });
+
+  const argv = (await readFile(argvLog, "utf8")).trim().split("\n");
+  // No scope flag: codex `mcp add` targets a global entry by default.
+  assert.deepEqual(argv.slice(0, 3), ["mcp", "add", "review-context"]);
+  // Env vars are forwarded with the Codex `--env KEY=VALUE` form. The fake
+  // CLI records each argv element on its own line, so `--env` and the
+  // `KEY=VALUE` pair are separate entries (cf. the `-e` form in mcp_add.sh).
+  assert.ok(argv.includes("--env"), "must forward env vars via --env");
+  assert.ok(
+    argv.some((a) => a === `AUGMENT_API_TOKEN=${token}`),
+    "token must reach the fake CLI via --env",
+  );
+  // ...and the launcher is an absolute start.sh path.
+  assert.ok(argv.at(-1)?.endsWith("/start.sh"), "final arg must be absolute start.sh path");
+
+  // User-facing preview redacts the secret but shows the placeholder.
+  assert.ok(!stdout.includes(token), "user-facing preview must redact the token");
+  assert.ok(stdout.includes("AUGMENT_API_TOKEN=***"), "must show redaction placeholder");
+});
+
+test("codex_remove.sh calls codex with a bare remove", async (t) => {
+  const bin = await makeTempDir("rc-fakebin-");
+  const home = await makeTempHome();
+  t.after(() => cleanup(bin, home));
+  const argvLog = join(bin, "argv.txt");
+  await installFakeCli(bin, "codex", argvLog);
+
+  await runScript(join(REPO_ROOT, "scripts", "codex_remove.sh"), {
+    env: {
+      PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      HOME: home,
+    },
+  });
+  const argv = (await readFile(argvLog, "utf8")).trim().split("\n");
+  assert.deepEqual(argv, ["mcp", "remove", "review-context"]);
+});
+
+// ---------------------------------------------------------------------------
 // Hermes Agent registration (scripts/hermes_add.sh + scripts/hermes_add.py)
 //
 // Hermes has no `mcp add` CLI, so the registrar splices ~/.hermes/config.yaml

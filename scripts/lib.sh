@@ -1,14 +1,16 @@
 # Shared helpers for review-context-mcp setup scripts.
 
-# Echoes "$@" with the value half of every "-e KEY=VAL" pair redacted, so
-# callers can safely log a command line before it runs with secrets in argv.
+# Echoes "$@" with the value half of every "-e KEY=VAL" / "--env KEY=VAL" pair
+# redacted, so callers can safely log a command line before it runs with
+# secrets in argv. Handles both the Claude/Augment `-e` form and the Codex
+# `--env` form.
 redact_env_args() {
   local out=() redact_next=0 a
   for a in "$@"; do
     if [ "$redact_next" = 1 ]; then
       out+=("${a%%=*}=***")
       redact_next=0
-    elif [ "$a" = "-e" ]; then
+    elif [ "$a" = "-e" ] || [ "$a" = "--env" ]; then
       out+=("$a")
       redact_next=1
     else
@@ -74,6 +76,25 @@ review_context_env_args() {
   fi
   if [ -n "${REVIEW_CONTEXT_DEBUG:-}" ]; then
     printf '%s\n' "-e" "REVIEW_CONTEXT_DEBUG=$REVIEW_CONTEXT_DEBUG"
+  fi
+}
+
+# Prints the `--env KEY=VAL` args needed to forward AUGMENT_API_TOKEN,
+# AUGMENT_API_URL, and REVIEW_CONTEXT_DEBUG to the Codex-launched server,
+# one per line (only for vars that are actually set). Codex's `mcp add`
+# forwards env vars with `--env KEY=VALUE` (not the `-e` form that
+# mcp_add.sh/auggie_add.sh use), so the two don't drift. Consume like
+# `review_context_env_args`:
+#   while IFS= read -r part; do codex_env_args+=("$part"); done < <(review_context_codex_env_args)
+review_context_codex_env_args() {
+  if [ -n "${AUGMENT_API_TOKEN:-}" ]; then
+    printf '%s\n' "--env" "AUGMENT_API_TOKEN=$AUGMENT_API_TOKEN"
+  fi
+  if [ -n "${AUGMENT_API_URL:-}" ]; then
+    printf '%s\n' "--env" "AUGMENT_API_URL=$AUGMENT_API_URL"
+  fi
+  if [ -n "${REVIEW_CONTEXT_DEBUG:-}" ]; then
+    printf '%s\n' "--env" "REVIEW_CONTEXT_DEBUG=$REVIEW_CONTEXT_DEBUG"
   fi
 }
 

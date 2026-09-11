@@ -57,6 +57,22 @@ make auggie-list
 `AUGGIE_SCOPE=user|project|local` maps to no flag / `--project` / `--local`.
 `--replace` is always passed so re-registering is non-interactive.
 
+## Register with Codex
+
+```bash
+make codex-add
+make codex-remove
+```
+
+Codex reads stdio MCP servers from `~/.codex/config.toml`, so this mirrors the
+Claude and Augment targets. `mcp add` without a scope flag installs a *global*
+server (the default), so one registration works in every project. It exits
+cleanly (status 0) when the Codex CLI is not installed, so it is safe in shared
+setup pipelines. `AUGMENT_API_TOKEN`, `AUGMENT_API_URL`, and
+`REVIEW_CONTEXT_DEBUG` are forwarded via `--env` when set, with secret values
+redacted from all user-facing output. Restart Codex to pick up the change (no
+hot-reload).
+
 ## Register with Hermes Agent
 
 ```bash
@@ -165,6 +181,7 @@ If this table changes, also update `test/mcp-stdio.test.js`'s
     install_local.sh              # bootstrap Node/npm and build
     mcp_add.sh / mcp_remove.sh    # Claude Code registration
     auggie_add.sh / auggie_remove.sh  # Augment CLI registration
+    codex_add.sh / codex_remove.sh    # Codex CLI registration (global)
     hermes_add.sh / hermes_add.py # Hermes Agent registration (config.yaml splice)
     lib.sh                        # shared helpers (scope, redaction)
   src/                            # TypeScript sources
