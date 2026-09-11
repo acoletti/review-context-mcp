@@ -20,12 +20,16 @@ Claude Code ──stdio──▶ review-context-mcp
                            │   │   ├─ search() → Augment backend
                            │   │   └─ exportToFile() / importFromFile()
                            │   ├─ Result cache (Map, persisted to JSON)
-                           │   └─ Board context cache (Map, persisted to JSON)
+                           │   ├─ Board context cache (Map, persisted to JSON)
+                           │   └─ Artifact blackboard (Map per session, persisted on every write)
                            │
                            └─ Session storage: ~/.claude/review-cache/
-                               ├─ {id}.state.json  (Augment index state)
-                               ├─ {id}.meta.json   (session metadata)
-                               └─ {id}.cache.json  (cached search results + board bundles)
+                               ├─ {id}.state.json       (Augment index state)
+                               ├─ {id}.meta.json        (session metadata)
+                               ├─ {id}.cache.json       (cached search results + board bundles)
+                               └─ artifacts/{id}.json   (blackboard; survives review_clear and
+                                                         workspace changes — removed only by
+                                                         review_clear_artifacts / review_delete_session)
 ```
 
 ## Key Design Decisions
